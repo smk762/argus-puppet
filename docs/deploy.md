@@ -53,17 +53,23 @@ docker run -d --name argus-puppet --gpus all \
 ```
 
 `GET /health` reports `"device": "cuda"`. After the first pose request it also reports
-`"provider": "CUDAExecutionProvider"`.
+`"provider": "CUDAExecutionProvider"`. Started without `--gpus` (or without the NVIDIA runtime), the GPU image runs
+on the CPU under the default `ARGUS_PUPPET_DEVICE=auto`: it logs a `cuda_unavailable` warning, takes no GPU lease, and
+`/health` reports `"device": "cpu"` with the reason in `cuda_unavailable`. With `ARGUS_PUPPET_DEVICE=cuda` it refuses
+pose requests (503) instead of running them on the CPU. See [Device](server.md#device).
+
+Name the container `argus-puppet`, as above, on a host whose GPU argus-iris brokers: see
+[GPU sharing](#gpu-sharing-argus-iris).
 
 ### Compose
 
-`compose.yaml` has a `puppet` service (the CPU image) and a `puppet-gpu` service (the CUDA image) behind the `gpu`
-profile. Both use the `puppet-models` volume. Run one of them, not both: they publish the same host port.
+`compose.yaml` has a `puppet` service (the CPU image) and an `argus-puppet` service (the CUDA image, named after its
+argus-iris tenant) behind the `gpu` profile. Both use the `puppet-models` volume. Run one of them, not both: they publish the same host port.
 
 ```bash
 docker compose run --rm puppet argus-puppet models fetch   # once
 docker compose up -d                                       # CPU
-docker compose --profile gpu up -d puppet-gpu              # or the GPU image
+docker compose --profile gpu up -d argus-puppet            # or the GPU image
 ```
 
 The compose file reads these variables from the shell or a `.env` file:
@@ -83,7 +89,7 @@ VERSION=<version> .`). Without `VERSION` the image reports `0.0.0.dev0`.
 verified. It also gives the provider and device, free VRAM on a GPU, and read-only mode:
 
 ```json
-{"puppet_version": "1.2", "version": "0.2.0", "read_only": false,
+{"puppet_version": "1.3", "version": "0.2.0", "read_only": false,
  "models": {"dwpose-l-384x288": true, "dwpose-m-256x192": true, "yolox_m": true, "yolox_nano": true},
  "pose_model": "dwpose-l-384x288", "detector_model": "yolox_m",
  "provider": "CUDAExecutionProvider", "device": "cuda", "gpu_coordinator": "none", "free_vram_mb": 22544}
@@ -106,7 +112,7 @@ All `ARGUS_PUPPET_*` settings are read in `src/argus_puppet/config.py`:
 |---|---|---|
 | `ARGUS_PUPPET_MODEL_DIR` | `/models` in the image (`~/.cache/argus_puppet/models` outside it) | Where the pinned model files live |
 | `ARGUS_PUPPET_PORT` | `8220` | Port, when `serve` gets no `--port`. The image passes `--port 8220` |
-| `ARGUS_PUPPET_DEVICE` | `auto` | `auto`, `cpu` or `cuda`. `cuda` on the CPU image falls back to the CPU |
+| `ARGUS_PUPPET_DEVICE` | `auto` (`cuda` on the compose GPU service) | `auto`, `cpu` or `cuda`. `auto` uses CUDA when a session can really get it, else the CPU (with a `cuda_unavailable` warning). `cuda` refuses pose work (503) rather than run it on the CPU, for example on the CPU image or without `--gpus`. See [Device](server.md#device) |
 | `ARGUS_PUPPET_GPU_MEM_LIMIT_MB` | runtime default | A cap on each ONNX Runtime CUDA session's arena, in MB (at least 256) |
 | `ARGUS_PUPPET_POSE_MODEL` | registry default | The pose model, by registry name (`argus-puppet models list`) |
 | `ARGUS_PUPPET_DETECTOR_MODEL` | registry default | The person detector, by registry name |
@@ -180,4 +186,42 @@ host, select the coordinator:
 The manifest declares one kind, `pose` (the person detector and the pose model loaded together; about 1600 MB VRAM,
 240 MB of it weights, batch priority, not preemptible). `POST /pose` leases at `interactive` priority unless the
 `X-Argus-Priority` header asks for another class. Folder scans lease at `batch` priority.
-`compose.yaml` lists these variables, commented out, on the `puppet-gpu` service.
+`compose.yaml` lists these variables, commented out, on the `argus-puppet` service.
+
+### A working broker configuration
+
+In the host's `.env`, beside `compose.yaml`, or as `-e` flags to `docker run`:
+
+```bash
+ARGUS_GPU_COORDINATOR=broker
+ARGUS_GPU_BROKER_URL=http://<IRIS_HOST>:8120
+ARGUS_GPU_BROKER_FALLBACK=lease
+ARGUS_GPU_BROKER_TOKEN=<IRIS_TOKEN>   # only when argus-iris is run with a token
+```
+
+The image already sets `ARGUS_GPU_TENANT_MANIFEST=/app/gpu-tenant.yaml`. Puppet registers its tenant (`argus-puppet`)
+with the broker on its first lease, not at start, so iris lists it only after the first pose request on CUDA. No lease
+is taken while puppet runs on the CPU.
+
+If argus-iris cannot be reached, leases come from `ARGUS_GPU_BROKER_FALLBACK` (`lease`: the host-wide file lock).
+`GET /health` keeps reporting `gpu_coordinator: broker` and shows `last_lease_via: fallback`. If iris answers but
+refuses the request (a wrong or missing token, a rejected request), `POST /pose` answers 503 with no `Retry-After` and
+says so, and the CLI prints the same message. The token is never echoed.
+
+### Counting puppet's VRAM against its lease
+
+argus-iris counts a container's VRAM as the tenant's own, inside its lease, only when it can link the container to
+the tenant. Otherwise the memory counts as unattributed, and puppet's VRAM is counted twice: once as unattributed
+and once in its lease. Iris links a container to the tenant in two ways:
+
+* Through its name. Iris matches the compose service name, or the container name outside compose, against the
+  tenant. The compose GPU service is `argus-puppet` for this reason, and the `docker run` examples use
+  `--name argus-puppet`.
+* Through `iris.yaml`, for any other name (a renamed service, a compose project prefix you match on, several
+  replicas):
+
+  ```yaml
+  tenants:
+    argus-puppet:
+      containers: ["<CONTAINER_NAME>", "<PROJECT>-argus-puppet-*"]   # fnmatch patterns
+  ```

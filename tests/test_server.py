@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import FakeEstimator, RecordingCoordinator, asgi_request, draw_image, megabytes
+from conftest import FakeEstimator, RecordingCoordinator, asgi_request, draw_image, fake_ort, megabytes
 from fastapi.testclient import TestClient
 
 from argus_puppet import gpu, registry, runtime
@@ -313,3 +313,79 @@ def test_the_module_level_app_is_built_from_the_environment(monkeypatch, tmp_pat
     app = mod.app
     assert app.state.puppet.settings.model_dir == tmp_path
     monkeypatch.delitem(mod.__dict__, "app")
+
+
+# ── device truth and broker refusals ────────────────────────────────────────────────────────────────────────────
+
+
+def _no_gpu(monkeypatch) -> None:
+    """A CUDA build in a container without --gpus: ORT has the provider compiled in, the driver is not there."""
+    fake_ort(monkeypatch, ("CUDAExecutionProvider", "CPUExecutionProvider"))
+    monkeypatch.setattr(runtime, "_probe_cuda_driver", lambda: "the CUDA driver (libcuda.so.1) cannot be loaded")
+
+
+def test_health_never_claims_cuda_for_a_cuda_build_without_a_gpu(settings, fake, monkeypatch) -> None:
+    _no_gpu(monkeypatch)
+    rec = RecordingCoordinator()
+    client = TestClient(create_app(dataclasses.replace(settings, device="auto"), estimator=fake, coordinator=rec))
+    h = Health.model_validate(client.get("/health").json())
+    assert h.device == "cpu" and "libcuda" in h.cuda_unavailable and h.free_vram_mb is None
+    assert _post(client, draw_image()).status_code == 200  # auto: posed on the CPU
+    assert rec.leases == []  # and the broker was not leased for it
+    assert Health.model_validate(client.get("/health").json()).device == "cpu"
+
+
+def test_health_reports_a_session_that_fell_back_to_the_cpu(settings, fake, monkeypatch) -> None:
+    fake_ort(monkeypatch, ("CUDAExecutionProvider", "CPUExecutionProvider"))  # the driver probe passes (conftest)
+    client = TestClient(create_app(dataclasses.replace(settings, device="auto"), estimator=fake))
+    assert client.get("/health").json()["device"] == "cuda"
+    runtime.note_cuda_unavailable("onnxruntime built the yolox_m session without CUDAExecutionProvider")
+    h = Health.model_validate(client.get("/health").json())
+    assert h.device == "cpu" and "without CUDAExecutionProvider" in h.cuda_unavailable
+
+
+def test_explicit_cuda_without_a_gpu_is_a_loud_503(settings, monkeypatch) -> None:
+    """ARGUS_PUPPET_DEVICE=cuda and no GPU: /pose is refused (503, no Retry-After: the operator's fix), nothing runs
+    on the CPU, no lease is taken, and /health says why."""
+    from argus_puppet.estimator import OnnxEstimator
+
+    _no_gpu(monkeypatch)
+    s = dataclasses.replace(settings, device="cuda")
+    rec = RecordingCoordinator()
+    client = TestClient(create_app(s, estimator=OnnxEstimator(s), coordinator=rec))
+    reply = _post(client, draw_image())
+    assert reply.status_code == 503 and "retry-after" not in reply.headers
+    detail = reply.json()["detail"]
+    assert "CUDA was asked for" in detail and "libcuda" in detail and "ARGUS_PUPPET_DEVICE=auto" in detail
+    assert rec.leases == []
+    h = Health.model_validate(client.get("/health").json())
+    assert h.device == "cuda" and "libcuda" in h.cuda_unavailable and h.provider is None
+
+
+@pytest.mark.parametrize("status", [401, 403, 422])
+def test_a_broker_refusal_is_503_without_retry_after(settings, fake, cuda, monkeypatch, status) -> None:
+    import httpx
+    from argus_cortex.gpu import NullCoordinator
+    from argus_cortex.gpu_broker import BrokerCoordinator
+
+    monkeypatch.setenv("ARGUS_GPU_BROKER_TOKEN", "s3cret-token")
+    broker = BrokerCoordinator(
+        "http://iris.invalid:8120",
+        tenant=gpu.TENANT,
+        token="s3cret-token",
+        fallback=NullCoordinator(),
+        transport=httpx.MockTransport(lambda r: httpx.Response(status, text=r.headers.get("authorization", ""))),
+    )
+    reply = _post(TestClient(create_app(settings, estimator=fake, coordinator=broker)), draw_image())
+    assert reply.status_code == 503 and "retry-after" not in reply.headers
+    detail = reply.json()["detail"]
+    assert "GPU busy" not in detail and "ARGUS_GPU_BROKER_TOKEN" in detail and "s3cret-token" not in detail
+    assert fake.calls == 0
+
+
+def test_health_says_how_the_last_lease_was_granted(settings, fake, cuda) -> None:
+    rec = RecordingCoordinator()
+    client = TestClient(create_app(settings, estimator=fake, coordinator=rec))
+    assert client.get("/health").json()["last_lease_via"] is None
+    assert _post(client, draw_image()).status_code == 200
+    assert client.get("/health").json()["last_lease_via"] == "local"

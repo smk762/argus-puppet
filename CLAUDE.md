@@ -44,6 +44,9 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | A pre-release tag moving `latest` / `latest-gpu` | `tests/test_image_version.py::test_only_a_final_release_moves_latest` |
 | A tracked image, video or model file, or an image hidden in a base64 literal | `tests/test_must_never.py` (`git ls-files` media/model suffixes; base64 runs decoded for image magic) |
 | A stored `PersonPose.labels` read by the set metrics (a 1.0 sidecar and a 1.1 one must give identical stats, compare and library output) | `tests/test_metrics.py::test_stored_person_labels_never_change_stats_compare_or_library` |
+| Work that runs on the CPU reported as CUDA, or a GPU lease taken for it (a CUDA build with no driver/GPU, or a session that came back without CUDA) | `tests/test_runtime.py::test_a_session_that_came_back_without_cuda_moves_auto_to_the_cpu`, `::test_no_driver_is_known_before_any_session`; `tests/test_gpu.py::test_no_lease_for_work_that_runs_on_the_cpu_of_a_cuda_build`, `::test_no_lease_once_a_session_came_back_without_cuda`; `tests/test_server.py::test_health_never_claims_cuda_for_a_cuda_build_without_a_gpu`, `::test_health_reports_a_session_that_fell_back_to_the_cpu` |
+| An explicit `ARGUS_PUPPET_DEVICE=cuda` run on the CPU instead of refused | `tests/test_runtime.py::test_explicit_cuda_is_refused_rather_than_run_on_the_cpu`, `::test_explicit_cuda_on_a_cpu_only_onnxruntime_is_refused`; `tests/test_server.py::test_explicit_cuda_without_a_gpu_is_a_loud_503` |
+| A broker refusal (4xx, unreadable reply) reported as a busy GPU with `Retry-After`, or the broker token echoed | `tests/test_gpu.py::test_a_broker_refusal_is_the_operators_not_a_busy_gpu`; `tests/test_server.py::test_a_broker_refusal_is_503_without_retry_after`; `tests/test_cli.py::test_pose_with_a_broker_refusal_says_it_is_the_operators` |
 | A wire schema that drifts from `models.py` | CI `post-test`: `argus-puppet schema --check`; `tests/test_cli.py` |
 
 ## Layout
@@ -66,7 +69,11 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   model needs a permissive licence and its sha256, or `tests/test_must_never.py` fails.
 - `config.py` — `Settings.from_env()` (`ARGUS_PUPPET_*`), `ConfigError`, and `DEFAULT_PORT` (the only code constant for the port;
   it may change).
-- `runtime.py` — ONNX Runtime plumbing: `providers(device)` (CUDA only when ORT really has it), the capped CUDA arena
+- `runtime.py` — ONNX Runtime plumbing: `providers(device)` (CUDA only while `cuda_problem()` is `None`: the provider
+  compiled in, `_probe_cuda_driver` (ctypes `cuInit`/`cuDeviceGetCount`, once) sees a GPU, and no session came back
+  without CUDA — `load_session` checks `session.get_providers()`; the first reason is kept, logged once as
+  `cuda_unavailable`; `auto` then runs on the CPU with no lease, explicit `cuda` raises `CudaUnavailable`, a
+  `ModelUnavailable` -> 503; `effective_device` for `/health`), the capped CUDA arena
   (`kSameAsRequested`, `Settings.gpu_mem_limit_mb` else 1024 MB per session), cached `load_session` built from the
   bytes `read_model` just read and hashed (never reopened by path, no memo on the load path), `check_model` for
   health/verify (hash memoised by path, device, inode, size, mtime and ctime), `ModelUnavailable` (ends with the
@@ -77,7 +84,9 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 - `primary.py` — the primary subject: curator's `area * (0.5 + 0.5 * det_score)`, or the body best matching a
   primary-face hint (mean of IoU and face coverage), falling back to area x score.
 - `gpu.py` — leases from argus-iris via `argus_cortex.gpu` (kind `pose`, figures kept in step with `gpu-tenant.yaml`
-  by `tests/test_gpu.py`); none on CPU; `parse_priority` for `X-Argus-Priority`; `folder_lease` holds one lease per
+  by `tests/test_gpu.py`); none on CPU; `LEASE_ERRORS` (busy: 503 + `Retry-After`) vs `OPERATOR_ERRORS`
+  (`CoordinatorInvalid`, cortex's `BrokerError` = a 4xx or unreadable reply: 503 without it, `operator_message`
+  scrubs the token); `last_via` (how the last lease was granted, `/health`'s `last_lease_via`); `parse_priority` for `X-Argus-Priority`; `folder_lease` holds one lease per
   folder run and hands it back on `should_yield()`.
 - `extract.py` — the library API: `pose_image(bytes|path) -> PoseResult`, `pose_folder(root) -> Iterator[ImageOutcome]`
   (atomic sorted-key sidecars, skip-existing, `sidecar_collision`, unreadable images reported), `scan() -> ScanSummary`.

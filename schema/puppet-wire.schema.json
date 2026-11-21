@@ -284,6 +284,19 @@
     "Health": {
       "description": "``GET /health``.",
       "properties": {
+        "cuda_unavailable": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why CUDA cannot be used in this process, when the device setting wants it (auto or cuda) and it is known to be missing: no CUDA provider in onnxruntime, no driver or GPU, or a session that came back without CUDA. null while CUDA is usable or not wanted (and in payloads before puppet_version 1.3).",
+          "title": "Cuda Unavailable"
+        },
         "detector_model": {
           "description": "Registry name of the person detector requests use.",
           "title": "Detector Model",
@@ -291,7 +304,7 @@
         },
         "device": {
           "default": "cpu",
-          "description": "'cpu' or 'cuda'.",
+          "description": "Where pose work runs: 'cuda' or 'cpu'. With ARGUS_PUPPET_DEVICE=auto it is 'cpu' once CUDA is known to be unusable (cuda_unavailable says why); with ARGUS_PUPPET_DEVICE=cuda it stays 'cuda' and pose requests are refused (503) while cuda_unavailable is set.",
           "title": "Device",
           "type": "string"
         },
@@ -314,6 +327,19 @@
           "description": "GPU lease coordinator mode (ARGUS_GPU_COORDINATOR): 'none', 'lease' or 'broker'.",
           "title": "Gpu Coordinator",
           "type": "string"
+        },
+        "last_lease_via": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How the last GPU lease was granted: 'local' (the none or lease coordinator), 'broker', or 'fallback' (the broker could not be reached and ARGUS_GPU_BROKER_FALLBACK granted it). null before the first lease (and in payloads before puppet_version 1.3).",
+          "title": "Last Lease Via"
         },
         "models": {
           "additionalProperties": {
@@ -342,7 +368,7 @@
           "title": "Provider"
         },
         "puppet_version": {
-          "default": "1.2",
+          "default": "1.3",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -790,7 +816,7 @@
           "type": "string"
         },
         "puppet_version": {
-          "default": "1.2",
+          "default": "1.3",
           "title": "Puppet Version",
           "type": "string"
         }
@@ -1020,7 +1046,7 @@
           "title": "Primary"
         },
         "puppet_version": {
-          "default": "1.2",
+          "default": "1.3",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1170,7 +1196,7 @@
           "$ref": "#/$defs/MetricParams"
         },
         "puppet_version": {
-          "default": "1.2",
+          "default": "1.3",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1440,7 +1466,7 @@
           "$ref": "#/$defs/MetricParams"
         },
         "puppet_version": {
-          "default": "1.2",
+          "default": "1.3",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1674,7 +1700,7 @@
           "type": "integer"
         },
         "puppet_version": {
-          "default": "1.2",
+          "default": "1.3",
           "title": "Puppet Version",
           "type": "string"
         },

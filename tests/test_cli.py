@@ -430,3 +430,29 @@ def test_threshold_defaults_match_the_library(tmp_path, monkeypatch) -> None:
     assert seen["dedupe_threshold"] == library.DEFAULT_DEDUPE_THRESHOLD
     runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "l.json"), "--dedupe-threshold", "0"])
     assert seen["dedupe_threshold"] is None
+
+
+def test_pose_with_a_broker_refusal_says_it_is_the_operators(monkeypatch, tmp_path, cuda) -> None:
+    import httpx
+    from argus_cortex.gpu import NullCoordinator
+    from argus_cortex.gpu_broker import BrokerCoordinator
+
+    from argus_puppet import gpu
+
+    _fake_estimator(monkeypatch)
+    monkeypatch.setenv("ARGUS_GPU_BROKER_TOKEN", "s3cret-token")
+    broker = BrokerCoordinator(
+        "http://iris.invalid:8120",
+        tenant=gpu.TENANT,
+        token="s3cret-token",
+        fallback=NullCoordinator(),
+        transport=httpx.MockTransport(lambda r: httpx.Response(401, text=r.headers.get("authorization", ""))),
+    )
+    monkeypatch.setattr(gpu, "_coordinator", broker)
+    (tmp_path / "a.png").write_bytes(draw_image())
+    result = runner.invoke(app, ["pose", str(tmp_path)])
+    assert result.exit_code == 1, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    out = " ".join(result.output.split())
+    assert "ARGUS_GPU_BROKER_TOKEN" in out and "not a busy GPU" in out and "no GPU lease" not in out
+    assert "s3cret-token" not in result.output

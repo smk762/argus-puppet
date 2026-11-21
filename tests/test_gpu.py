@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 from argus_cortex.gpu_wire import load_tenant_manifest
-from conftest import RecordingCoordinator
+from conftest import RecordingCoordinator, fake_ort
 
-from argus_puppet import gpu
+from argus_puppet import gpu, runtime
 
 MANIFEST = Path(__file__).resolve().parent.parent / "gpu-tenant.yaml"
 
@@ -79,3 +79,77 @@ def test_a_folder_lease_gives_the_gpu_back_when_asked(cuda) -> None:
         assert len(rec.leases) == 2
     assert rec.released == 2
     assert {lease["priority"] for lease in rec.leases} == {"batch"}
+
+
+def test_no_lease_for_work_that_runs_on_the_cpu_of_a_cuda_build(monkeypatch) -> None:
+    """A CUDA build with no usable GPU (ORT has the provider compiled in; the driver sees nothing): its work runs on
+    the CPU, so neither auto nor cuda leases the broker for it."""
+    fake_ort(monkeypatch, ("CUDAExecutionProvider", "CPUExecutionProvider"))
+    monkeypatch.setattr(runtime, "_probe_cuda_driver", lambda: "libcuda.so.1 cannot be loaded")
+    rec = RecordingCoordinator()
+    for device in ("auto", "cuda"):
+        with gpu.lease(device, priority="interactive", coordinator=rec) as handle:
+            assert handle is None
+        with gpu.folder_lease(device, coordinator=rec) as held:
+            assert held.handle is None
+    assert rec.leases == []
+
+
+def test_no_lease_once_a_session_came_back_without_cuda(monkeypatch, tmp_path) -> None:
+    """The probe passed, but the first session fell back to the CPU: from then on no lease is taken."""
+    fake_ort(monkeypatch, ("CUDAExecutionProvider", "CPUExecutionProvider"))
+    rec = RecordingCoordinator()
+    with gpu.lease("auto", priority="interactive", coordinator=rec) as handle:
+        assert handle is not None
+    runtime.note_cuda_unavailable("onnxruntime built the session without CUDAExecutionProvider")
+    with gpu.lease("auto", priority="interactive", coordinator=rec) as handle:
+        assert handle is None
+    assert len(rec.leases) == 1
+
+
+def test_the_way_the_last_lease_was_granted_is_kept(cuda) -> None:
+    rec = RecordingCoordinator()
+    assert gpu.last_via(rec) is None
+    with gpu.lease("cuda", priority="interactive", coordinator=rec):
+        pass
+    assert gpu.last_via(rec) == "local"
+
+
+def _broker(status: int, token: str = "s3cret-token"):
+    """A real cortex BrokerCoordinator in front of a broker that answers every call with *status* (echoing the
+    Authorization header it got, as a careless broker might)."""
+    import httpx
+    from argus_cortex.gpu import NullCoordinator
+    from argus_cortex.gpu_broker import BrokerCoordinator
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text=f"refused: {request.headers.get('authorization', '')}")
+
+    return BrokerCoordinator(
+        "http://iris.invalid:8120",
+        tenant=gpu.TENANT,
+        token=token,
+        fallback=NullCoordinator(),
+        transport=httpx.MockTransport(handler),
+        timeout_s=1.0,
+    )
+
+
+@pytest.mark.parametrize("status", [401, 403, 422])
+def test_a_broker_refusal_is_the_operators_not_a_busy_gpu(cuda, monkeypatch, status) -> None:
+    monkeypatch.setenv("ARGUS_GPU_BROKER_TOKEN", "s3cret-token")
+    with (
+        pytest.raises(gpu.OPERATOR_ERRORS) as caught,
+        gpu.lease("cuda", priority="interactive", coordinator=_broker(status)),
+    ):
+        pass
+    assert not isinstance(caught.value, gpu.LEASE_ERRORS)
+    message = gpu.operator_message(caught.value)
+    assert "ARGUS_GPU_BROKER_TOKEN" in message and "not a busy GPU" in message and str(status) in message
+    assert "s3cret-token" not in message
+
+
+def test_an_unreachable_broker_falls_back_rather_than_refusing(cuda) -> None:
+    with gpu.lease("cuda", priority="interactive", coordinator=(coord := _broker(503))) as handle:
+        assert handle.via == "fallback"
+    assert gpu.last_via(coord) == "fallback"

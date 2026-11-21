@@ -42,7 +42,9 @@ from argus_puppet.skeleton import LAYOUT, NUM_KEYPOINTS, part_mean_scores
 # 1.1: PersonPose.labels (stance / arms / facing per person, filled by extraction; optional, null in 1.0 payloads).
 # 1.2: why a pose is unusable: PoseSetItem.unusable_reason and PoseSetStats.unusable_reasons; PoseMatch.unusable_reason
 #      and PoseSetComparison.output_unusable_reasons / reference_unusable_reasons (optional; null / {} before 1.2).
-PUPPET_VERSION = "1.2"
+# 1.3: Health.cuda_unavailable (why CUDA cannot be used) and Health.last_lease_via (how the last GPU lease was granted);
+#      Health.device now says where work really runs (optional; null before 1.3).
+PUPPET_VERSION = "1.3"
 SUPPORTED_PUPPET_MAJORS: tuple[str, ...] = ("1",)
 WIRE_TITLE = "argus-puppet wire contract"
 # The committed schema, relative to the repo root (``argus-puppet schema`` writes it, ``--check`` compares).
@@ -655,9 +657,26 @@ class Health(_Versioned):
     pose_model: str = Field(..., description="Registry name of the pose model requests use.")
     detector_model: str = Field(..., description="Registry name of the person detector requests use.")
     provider: str | None = Field(None, description="ONNX Runtime provider in use, once a model is loaded.")
-    device: str = Field("cpu", description="'cpu' or 'cuda'.")
+    device: str = Field(
+        "cpu",
+        description="Where pose work runs: 'cuda' or 'cpu'. With ARGUS_PUPPET_DEVICE=auto it is 'cpu' once CUDA is "
+        "known to be unusable (cuda_unavailable says why); with ARGUS_PUPPET_DEVICE=cuda it stays 'cuda' and pose "
+        "requests are refused (503) while cuda_unavailable is set.",
+    )
+    cuda_unavailable: str | None = Field(
+        None,
+        description="Why CUDA cannot be used in this process, when the device setting wants it (auto or cuda) and it "
+        "is known to be missing: no CUDA provider in onnxruntime, no driver or GPU, or a session that came back "
+        "without CUDA. null while CUDA is usable or not wanted (and in payloads before puppet_version 1.3).",
+    )
     gpu_coordinator: str = Field(
         "none", description="GPU lease coordinator mode (ARGUS_GPU_COORDINATOR): 'none', 'lease' or 'broker'."
+    )
+    last_lease_via: str | None = Field(
+        None,
+        description="How the last GPU lease was granted: 'local' (the none or lease coordinator), 'broker', or "
+        "'fallback' (the broker could not be reached and ARGUS_GPU_BROKER_FALLBACK granted it). null before the "
+        "first lease (and in payloads before puppet_version 1.3).",
     )
     free_vram_mb: int | None = Field(None, ge=0, description="Free GPU memory, when on CUDA and measurable.")
 
