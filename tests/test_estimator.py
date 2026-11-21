@@ -45,6 +45,45 @@ def test_resample_identity_and_zero_border() -> None:
     assert (shifted[:, :2] == 0).all() and np.array_equal(shifted[:, 2:], img[:, :3])
 
 
+def _resample_before(img, sx, tx, sy, ty, out_w, out_h, *, clamp):
+    """resample as it was: the whole image to float32, then rows and columns gathered (the reference)."""
+    h, w = img.shape[:2]
+    y0, y1, wy0, wy1 = est._axis(out_h, sy, ty, h, clamp)
+    x0, x1, wx0, wx1 = est._axis(out_w, sx, tx, w, clamp)
+    f = img.astype(np.float32)
+    rows = f[y0] * wy0[:, None, None] + f[y1] * wy1[:, None, None]
+    out = rows[:, x0] * wx0[None, :, None] + rows[:, x1] * wx1[None, :, None]
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize(
+    ("shape", "geometry", "clamp"),
+    [
+        ((480, 640), (640 / 427, 0.5 * 640 / 427 - 0.5, 480 / 320, 0.5 * 480 / 320 - 0.5, 427, 320), True),  # letterbox
+        ((300, 200), (200 / 400, 0.5 * 200 / 400 - 0.5, 300 / 600, 0.5 * 300 / 600 - 0.5, 400, 600), True),  # upscale
+        ((480, 640), (0.83, -40.2, 0.83, 13.7, 192, 256), False),  # a person crop running off the left edge
+        ((120, 90), (1.7, 60.0, 1.7, -30.0, 192, 256), False),  # mostly outside the image
+    ],
+)
+def test_resample_is_unchanged_by_gathering_before_converting(shape, geometry, clamp) -> None:
+    img = np.random.default_rng(7).integers(0, 256, (*shape, 3), dtype=np.uint8)
+    assert np.array_equal(est.resample(img, *geometry, clamp=clamp), _resample_before(img, *geometry, clamp=clamp))
+
+
+def test_resample_does_not_convert_the_whole_image() -> None:
+    """A 192x256 crop of a 12 MP frame works on the crop's pixels: no float copy of the frame (144 MB here)."""
+    import tracemalloc
+
+    img = np.zeros((3000, 4000, 3), np.uint8)
+    tracemalloc.start()
+    try:
+        est.resample(img, 1.3, 900.0, 1.3, 700.0, 192, 256, clamp=False)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 * 1024 * 1024, f"resample allocated {peak / 2**20:.0f} MB for a 192x256 crop"
+
+
 def test_letterbox_pastes_top_left_on_grey() -> None:
     rgb = np.full((100, 200, 3), 10, np.uint8)
     canvas, r = est.letterbox(rgb, 64, 64)

@@ -72,13 +72,18 @@ def _axis(n_out: int, s: float, t: float, n_in: int, clamp: bool) -> tuple[np.nd
 def resample(
     img: np.ndarray, sx: float, tx: float, sy: float, ty: float, out_w: int, out_h: int, *, clamp: bool
 ) -> np.ndarray:
-    """Axis-aligned bilinear warp of an ``HxWx3`` uint8 image: ``out[y, x] = img(sy*y + ty, sx*x + tx)``."""
+    """Axis-aligned bilinear warp of an ``HxWx3`` uint8 image: ``out[y, x] = img(sy*y + ty, sx*x + tx)``.
+
+    The four taps are gathered from the uint8 image first and only those output-sized arrays become float32 (never
+    the whole frame); the arithmetic is the same, term for term, as weighting rows and then columns."""
     h, w = img.shape[:2]
     y0, y1, wy0, wy1 = _axis(out_h, sy, ty, h, clamp)
     x0, x1, wx0, wx1 = _axis(out_w, sx, tx, w, clamp)
-    f = img.astype(np.float32)
-    rows = f[y0] * wy0[:, None, None] + f[y1] * wy1[:, None, None]
-    out = rows[:, x0] * wx0[None, :, None] + rows[:, x1] * wx1[None, :, None]
+    ry0, ry1 = y0[:, None], y1[:, None]
+    wy0, wy1 = wy0[:, None, None], wy1[:, None, None]
+    left = img[ry0, x0].astype(np.float32) * wy0 + img[ry1, x0].astype(np.float32) * wy1
+    right = img[ry0, x1].astype(np.float32) * wy0 + img[ry1, x1].astype(np.float32) * wy1
+    out = left * wx0[None, :, None] + right * wx1[None, :, None]
     return np.clip(np.rint(out), 0, 255).astype(np.uint8)
 
 
