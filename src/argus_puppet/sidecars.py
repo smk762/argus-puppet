@@ -5,6 +5,7 @@ So a caller can write ``pose_set_stats(load_sidecars(folder))`` without re-runni
 
 from __future__ import annotations
 
+import glob
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -44,3 +45,33 @@ def load_sidecars(folder: Path, *, recursive: bool = True, skip_invalid: bool = 
             if not skip_invalid:
                 raise
     return out
+
+
+def load_sidecars_with_paths(
+    folder: Path, *, recursive: bool = True, skip_invalid: bool = False
+) -> list[tuple[Path, PoseResult]]:
+    """As :func:`load_sidecars`, each result paired with the sidecar file it came from."""
+    out: list[tuple[Path, PoseResult]] = []
+    for path in find_sidecars(folder, recursive=recursive):
+        try:
+            out.append((path, load_sidecar(path)))
+        except SidecarError:
+            if not skip_invalid:
+                raise
+    return out
+
+
+def image_for_sidecar(sidecar: Path) -> Path | None:
+    """The image a sidecar sits beside (``photo.pose.json`` -> ``photo.jpg``, any supported suffix and case), or
+    ``None`` when there is none. With several (``photo.jpg`` and ``photo.png``) the first in sorted order, the one
+    ``argus-puppet pose`` posed."""
+    from argus_puppet.extract import IMAGE_SUFFIXES  # noqa: PLC0415 - extract pulls in the estimator stack
+
+    sidecar = Path(sidecar)
+    stem = sidecar.name[: -len(SIDECAR_SUFFIX)] if sidecar.name.endswith(SIDECAR_SUFFIX) else sidecar.stem
+    found = sorted(
+        p
+        for p in sidecar.parent.glob(f"{glob.escape(stem)}.*")
+        if p.stem == stem and p.suffix.lower() in IMAGE_SUFFIXES and p.is_file()
+    )
+    return found[0] if found else None
