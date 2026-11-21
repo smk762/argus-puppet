@@ -13,6 +13,14 @@ DEFAULT_PORT = 8110
 DEFAULT_MODEL_DIR = Path("~/.cache/argus_puppet/models")
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_PIXELS = 40_000_000
+# People kept per image, highest detector score first: bounds the pose batch (and the CUDA arena it grows).
+DEFAULT_MAX_PEOPLE = 20
+DEFAULT_DET_THRESHOLD = 0.3
+DEFAULT_NMS_IOU = 0.45
+# Images one POST /pose/scan runs through the estimator; past it the rest are skipped (reason "max_images").
+DEFAULT_MAX_SCAN_IMAGES = 2000
+# POST /pose calls in flight at once; past it a call is answered 503 + Retry-After instead of queued.
+DEFAULT_POSE_CONCURRENCY = 2
 DEVICES: tuple[str, ...] = ("auto", "cpu", "cuda")
 
 Device = Literal["auto", "cpu", "cuda"]
@@ -36,6 +44,16 @@ def _int(name: str, default: int | None) -> int | None:
         raise ConfigError(f"ARGUS_PUPPET_{name} {raw!r} is not a whole number") from exc
 
 
+def _float(name: str, default: float) -> float:
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"ARGUS_PUPPET_{name} {raw!r} is not a number") from exc
+
+
 def _list(name: str) -> tuple[str, ...]:
     return tuple(v.strip() for v in _env(name).split(",") if v.strip())
 
@@ -48,7 +66,7 @@ class Settings:
     pose_model: str = registry.DEFAULT_POSE
     detector_model: str = registry.DEFAULT_DETECTOR
     device: Device = "auto"
-    # A cap on ONNX Runtime's CUDA arena, in MB; None leaves it to ORT.
+    # A cap on each ONNX Runtime CUDA session's arena, in MB; None: runtime.DEFAULT_GPU_MEM_LIMIT_MB.
     gpu_mem_limit_mb: int | None = None
     # The only root a caller-supplied path may fall under. None: routes that take a path refuse.
     data_root: Path | None = None
@@ -59,6 +77,11 @@ class Settings:
     trusted_hosts: tuple[str, ...] = field(default_factory=tuple)
     max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES
     max_pixels: int = DEFAULT_MAX_PIXELS
+    max_people: int = DEFAULT_MAX_PEOPLE
+    det_threshold: float = DEFAULT_DET_THRESHOLD
+    nms_iou: float = DEFAULT_NMS_IOU
+    max_scan_images: int = DEFAULT_MAX_SCAN_IMAGES
+    pose_concurrency: int = DEFAULT_POSE_CONCURRENCY
 
     def __post_init__(self) -> None:
         if not 1 <= self.port <= 65535:
@@ -79,6 +102,15 @@ class Settings:
             raise ConfigError(f"ARGUS_PUPPET_MAX_UPLOAD_BYTES {self.max_upload_bytes}: must be at least 1024")
         if self.max_pixels < 64 * 64:
             raise ConfigError(f"ARGUS_PUPPET_MAX_PIXELS {self.max_pixels}: must be at least {64 * 64}")
+        if not 1 <= self.max_people <= 500:
+            raise ConfigError(f"ARGUS_PUPPET_MAX_PEOPLE {self.max_people}: must be between 1 and 500")
+        for setting, value in (("DET_THRESHOLD", self.det_threshold), ("NMS_IOU", self.nms_iou)):
+            if not 0.0 < value < 1.0:
+                raise ConfigError(f"ARGUS_PUPPET_{setting} {value}: must be between 0 and 1 (exclusive)")
+        if self.max_scan_images < 1:
+            raise ConfigError(f"ARGUS_PUPPET_MAX_SCAN_IMAGES {self.max_scan_images}: must be at least 1")
+        if not 1 <= self.pose_concurrency <= 64:
+            raise ConfigError(f"ARGUS_PUPPET_POSE_CONCURRENCY {self.pose_concurrency}: must be between 1 and 64")
 
     def model_path(self, name: str) -> Path:
         """Where pinned model *name*'s file lives (whether or not it is there yet)."""
@@ -107,4 +139,9 @@ class Settings:
             trusted_hosts=tuple(h.lower() for h in _list("TRUSTED_HOSTS")),
             max_upload_bytes=_int("MAX_UPLOAD_BYTES", DEFAULT_MAX_UPLOAD_BYTES),  # type: ignore[arg-type]
             max_pixels=_int("MAX_PIXELS", DEFAULT_MAX_PIXELS),  # type: ignore[arg-type]
+            max_people=_int("MAX_PEOPLE", DEFAULT_MAX_PEOPLE),  # type: ignore[arg-type]
+            det_threshold=_float("DET_THRESHOLD", DEFAULT_DET_THRESHOLD),
+            nms_iou=_float("NMS_IOU", DEFAULT_NMS_IOU),
+            max_scan_images=_int("MAX_SCAN_IMAGES", DEFAULT_MAX_SCAN_IMAGES),  # type: ignore[arg-type]
+            pose_concurrency=_int("POSE_CONCURRENCY", DEFAULT_POSE_CONCURRENCY),  # type: ignore[arg-type]
         )
