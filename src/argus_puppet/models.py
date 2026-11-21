@@ -607,7 +607,7 @@ class ImageOutcome(BaseModel):
     reason: str | None = Field(
         None,
         description="Why it was skipped ('exists', 'sidecar_collision', 'max_images', 'outside_root') or failed "
-        "('unreadable', 'too_large').",
+        "('unreadable', 'too_large', 'unwritable': the sidecar could not be written).",
     )
     detail: str | None = Field(None, description="The error, for a failed image.")
     people: int = Field(0, ge=0, description="People found (0 unless written).")

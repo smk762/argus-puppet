@@ -123,6 +123,9 @@ def pose(
         typer.echo(summary.model_dump_json(indent=2))
     else:
         _print_summary(summary)
+    unwritable = summary.failed.get(extract.FAIL_UNWRITABLE, 0)
+    if unwritable:
+        raise fail(f"{unwritable} sidecar(s) could not be written: is the folder writable?")
     if summary.images == 0 or (summary.written == 0 and summary.failed):
         raise typer.Exit(1)
 

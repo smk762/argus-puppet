@@ -5,8 +5,9 @@
   :class:`~argus_puppet.models.ImageOutcome` per image,
   writing each sidecar atomically (temp file + ``os.replace``, sorted keys). An existing sidecar is kept unless
   ``overwrite``; two images sharing a stem (``a.jpg`` + ``a.png``) would share a sidecar, so only the first in sorted
-  order is posed and the other is skipped (``sidecar_collision``). An unreadable image is reported, never fatal; a
-  model that cannot run or a GPU lease that is not granted stops the run (raised).
+  order is posed and the other is skipped (``sidecar_collision``). An unreadable image, or a sidecar that cannot be
+  written (``unwritable``: an image in a folder that cannot take a file is not posed at all), is reported, never
+  fatal; a model that cannot run or a GPU lease that is not granted stops the run (raised).
 * :func:`scan` runs :func:`pose_folder` to the end and returns a :class:`~argus_puppet.models.ScanSummary`.
 
 Images are decoded through :func:`argus_cortex.limits.open_image` (the pixel and byte caps from settings), with
@@ -61,6 +62,7 @@ SKIP_LIMIT = SKIP_MAX_IMAGES
 SKIP_OUTSIDE = "outside_root"
 FAIL_UNREADABLE = "unreadable"
 FAIL_TOO_LARGE = "too_large"
+FAIL_UNWRITABLE = "unwritable"
 
 
 # ── one image ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -244,6 +246,11 @@ def pose_folder(
 
 
 def _pose_one(plan: _Plan, *, settings: Settings, estimator: estimator_mod.Estimator, base: Path) -> ImageOutcome:
+    sidecar = sidecar_path(plan.path)
+    if not os.access(sidecar.parent, os.W_OK):  # checked first: no point posing what cannot be kept
+        detail = f"cannot write to {sidecar.parent.relative_to(base).as_posix() or '.'}: the folder is not writable"
+        log.warning("sidecar_unwritable", image=plan.rel, error=detail)
+        return ImageOutcome(image=plan.rel, status="failed", reason=FAIL_UNWRITABLE, detail=detail)
     try:
         data = plan.path.read_bytes()
         image = decode(data, settings)
@@ -253,8 +260,12 @@ def _pose_one(plan: _Plan, *, settings: Settings, estimator: estimator_mod.Estim
         log.warning("image_unreadable", image=plan.rel, error=str(exc))
         return ImageOutcome(image=plan.rel, status="failed", reason=FAIL_UNREADABLE, detail=str(exc))
     result = build_result(image, name=plan.rel, sha256=hashlib.sha256(data).hexdigest(), estimator=estimator)
-    sidecar = sidecar_path(plan.path)
-    write_sidecar(result, sidecar)
+    try:
+        write_sidecar(result, sidecar)
+    except OSError as exc:  # a directory in its place, a full disk, a read-only mount
+        log.warning("sidecar_unwritable", image=plan.rel, error=str(exc))
+        detail = f"the sidecar could not be written: {exc.strerror or type(exc).__name__}"
+        return ImageOutcome(image=plan.rel, status="failed", reason=FAIL_UNWRITABLE, detail=detail)
     return ImageOutcome(
         image=plan.rel, status="written", people=len(result.people), sidecar=sidecar.relative_to(base).as_posix()
     )

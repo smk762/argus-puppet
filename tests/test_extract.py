@@ -167,6 +167,44 @@ def test_an_unreadable_image_is_reported_not_fatal(settings, fake, tmp_path) -> 
     assert not (root / "a.pose.json").exists()
 
 
+@pytest.fixture
+def read_only_folder(tmp_path):
+    root = tmp_path / "ro"
+    _write(root / "a.png", draw_image())
+    _write(root / "b.png", draw_image())
+    root.chmod(0o555)
+    if os.access(root, os.W_OK):  # root ignores the mode bits
+        root.chmod(0o755)
+        pytest.skip("running as a user who can write to a 0555 folder")
+    yield root
+    root.chmod(0o755)
+
+
+def test_a_sidecar_that_cannot_be_written_is_a_failed_outcome_not_an_abort(settings, fake, read_only_folder) -> None:
+    outcomes = list(extract.pose_folder(read_only_folder, settings=settings, estimator=fake))
+    assert [(o.image, o.status, o.reason) for o in outcomes] == [
+        ("a.png", "failed", "unwritable"),
+        ("b.png", "failed", "unwritable"),
+    ]
+    assert all(o.detail for o in outcomes)
+    assert fake.calls == 0  # a folder that cannot take a sidecar is not posed into
+
+
+def test_one_unwritable_sidecar_does_not_stop_the_rest(settings, fake, tmp_path) -> None:
+    root = tmp_path / "clash"
+    _write(root / "a.png", draw_image())
+    _write(root / "b.png", draw_image())
+    (root / "a.pose.json").mkdir()  # a directory where a's sidecar would go
+    summary = extract.scan(root, settings=settings, estimator=fake, overwrite=True)
+    assert [(o.image, o.status, o.reason) for o in summary.outcomes] == [
+        ("a.png", "failed", "unwritable"),
+        ("b.png", "written", None),
+    ]
+    assert summary.failed == {"unwritable": 1} and summary.written == 1
+    assert sidecar_path(root / "b.png").exists()
+    assert not [p for p in root.iterdir() if p.name.endswith(".tmp")]  # no temp file left behind
+
+
 def test_a_model_that_cannot_run_stops_the_run(settings, folder) -> None:
     broken = FakeEstimator(error=runtime.ModelUnavailable("Model x not found."))
     with pytest.raises(runtime.ModelUnavailable):

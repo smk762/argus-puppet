@@ -404,7 +404,7 @@
             }
           ],
           "default": null,
-          "description": "Why it was skipped ('exists', 'sidecar_collision', 'max_images', 'outside_root') or failed ('unreadable', 'too_large').",
+          "description": "Why it was skipped ('exists', 'sidecar_collision', 'max_images', 'outside_root') or failed ('unreadable', 'too_large', 'unwritable': the sidecar could not be written).",
           "title": "Reason"
         },
         "sidecar": {

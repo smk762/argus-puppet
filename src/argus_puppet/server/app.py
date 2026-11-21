@@ -491,7 +491,7 @@ def create_app(
             raise HTTPException(404, f"{req.path!r} does not exist under the data root")
         async with state.scan_admit.slot():
             try:
-                return await asyncio.to_thread(
+                summary = await asyncio.to_thread(
                     extract.scan,
                     target,
                     label=req.path,
@@ -505,6 +505,19 @@ def create_app(
                 )
             except Exception as exc:  # noqa: BLE001 - model_errors maps what it knows and re-raises the rest
                 raise model_errors(exc) from None
+        unwritable = summary.failed.get(extract.FAIL_UNWRITABLE, 0)
+        if unwritable and summary.written == 0:
+            # 409, as for a missing data root: the server's folder, not the request, is what stands in the way, and
+            # retrying will not help until an operator fixes it. The summary says which images and why.
+            raise HTTPException(
+                409,
+                {
+                    "message": f"no sidecar could be written: {unwritable} could not be written under {req.path!r} "
+                    "(is the data root read-only?)",
+                    "summary": summary.model_dump(mode="json"),
+                },
+            )
+        return summary
 
     cap = settings.max_json_bytes
 

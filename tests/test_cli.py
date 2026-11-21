@@ -81,6 +81,18 @@ def test_pose_exits_non_zero_when_nothing_could_be_processed(monkeypatch, tmp_pa
     assert runner.invoke(app, ["pose", str(tmp_path)]).exit_code == 1  # every image failed
 
 
+def test_pose_reports_unwritable_sidecars_and_exits_non_zero(monkeypatch, tmp_path) -> None:
+    _fake_estimator(monkeypatch)
+    (tmp_path / "a.png").write_bytes(draw_image())
+    (tmp_path / "b.png").write_bytes(draw_image())
+    (tmp_path / "a.pose.json").mkdir()
+    result = runner.invoke(app, ["pose", str(tmp_path), "--overwrite"])
+    assert result.exit_code == 1, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)  # a message, not a traceback
+    assert "could not be written" in result.output
+    assert (tmp_path / "b.pose.json").is_file()
+
+
 def test_pose_refuses_bad_settings_and_missing_models(monkeypatch, tmp_path) -> None:
     (tmp_path / "a.png").write_bytes(draw_image())
     result = runner.invoke(app, ["pose", str(tmp_path), "--detector", "nope"])

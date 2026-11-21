@@ -119,15 +119,16 @@ and one `ImageOutcome` per image. Images are `.jpg`, `.jpeg`, `.png` and `.webp`
 | `outside_root` | skipped | The image resolves outside the data root (a symlink) |
 | `unreadable` | failed | The file could not be read or decoded |
 | `too_large` | failed | Over the byte or pixel cap |
+| `unwritable` | failed | The sidecar could not be written: its folder is not writable (the image is then not posed), or the write failed (a directory in its place, a full disk) |
 
 A failed image never stops the run. A missing model or a refused GPU lease does (503).
 
 | Status | When |
 |---|---|
-| 200 | The run finished, including runs where some images failed or none were found |
+| 200 | The run finished, including runs where some images failed (some `unwritable` among written ones too) or none were found |
 | 400 | `path` falls outside the data root |
 | 404 | `path` does not exist under the data root |
-| 409 | No data root is configured: the route is off (answered before the body is read) |
+| 409 | No data root is configured: the route is off (answered before the body is read). Or no sidecar at all could be written (every attempt failed `unwritable`, typically a read-only data root): `detail` is then `{"message", "summary"}`, the `ScanSummary` of the run. Retrying will not help until the folder is writable |
 | 413 | The body is larger than 16 KiB: a `ScanRequest` is a path and two flags |
 | 415 | `Content-Type` is present and is not `application/json` |
 | 422 | The body is not a valid `ScanRequest` |

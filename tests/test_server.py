@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 import threading
 import time
 from pathlib import Path
@@ -14,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from argus_puppet import registry, runtime
 from argus_puppet.config import Settings
-from argus_puppet.models import Health, PoseResult
+from argus_puppet.models import Health, PoseResult, ScanSummary
 from argus_puppet.server.app import SCAN_JSON_BYTES, create_app, parse_face_hint
 
 
@@ -264,6 +265,25 @@ def test_a_scan_without_a_data_root_is_refused_before_its_body_is_read(settings,
     app = create_app(settings, estimator=fake)  # no data root
     reply = asgi_request(app, "/pose/scan", [b'{"path": "set"}'], headers={"content-type": "application/json"})
     assert reply.status == 409 and reply.consumed == 0
+
+
+def test_a_scan_that_can_write_nothing_is_409_with_the_summary(settings, fake, data_root) -> None:
+    client = _scan_client(settings, data_root, fake)
+    folder = data_root / "set"
+    folder.chmod(0o555)
+    try:
+        if os.access(folder, os.W_OK):
+            pytest.skip("running as a user who can write to a 0555 folder")
+        reply = client.post("/pose/scan", json={"path": "set"})
+    finally:
+        folder.chmod(0o755)
+    assert reply.status_code == 409, reply.text
+    detail = reply.json()["detail"]
+    assert "could not be written" in detail["message"]
+    assert ScanSummary.model_validate(detail["summary"]).failed == {"unwritable": 1}
+    (folder / "sub" / "b.pose.json").mkdir()  # one unwritable sidecar among writable ones: 200, reported
+    reply = client.post("/pose/scan", json={"path": "set", "recursive": True, "overwrite": True})
+    assert reply.status_code == 200 and reply.json()["failed"] == {"unwritable": 1} and reply.json()["written"] == 1
 
 
 def test_scan_with_a_missing_model_is_503(settings, data_root) -> None:
