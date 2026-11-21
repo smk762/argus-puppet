@@ -104,7 +104,7 @@
             }
           ],
           "default": null,
-          "description": "Close pose match distance (default: compare.DEFAULT_CLOSE_THRESHOLD, 0.08).",
+          "description": "Close pose match distance (default: compare.DEFAULT_CLOSE_THRESHOLD, 0.04).",
           "title": "Threshold"
         }
       },
@@ -342,7 +342,7 @@
           "title": "Provider"
         },
         "puppet_version": {
-          "default": "1.0",
+          "default": "1.1",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -636,6 +636,18 @@
           "title": "Keypoints",
           "type": "array"
         },
+        "labels": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PoseLabels"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Coarse stance / arms / facing labels from this person's keypoints (labels.pose_labels at the default joint score), filled by extraction since puppet_version 1.1; null in 1.0 payloads. Informational: the set metrics (/stats, /compare) and library builds always recompute labels from the keypoints and never read this field."
+        },
         "part_scores": {
           "$ref": "#/$defs/PartScores",
           "description": "Mean keypoint score per part."
@@ -778,7 +790,7 @@
           "type": "string"
         },
         "puppet_version": {
-          "default": "1.0",
+          "default": "1.1",
           "title": "Puppet Version",
           "type": "string"
         }
@@ -987,7 +999,7 @@
           "title": "Primary"
         },
         "puppet_version": {
-          "default": "1.0",
+          "default": "1.1",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1118,7 +1130,7 @@
           "$ref": "#/$defs/MetricParams"
         },
         "puppet_version": {
-          "default": "1.0",
+          "default": "1.1",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1348,7 +1360,7 @@
           "$ref": "#/$defs/MetricParams"
         },
         "puppet_version": {
-          "default": "1.0",
+          "default": "1.1",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1563,7 +1575,7 @@
           "type": "integer"
         },
         "puppet_version": {
-          "default": "1.0",
+          "default": "1.1",
           "title": "Puppet Version",
           "type": "string"
         },

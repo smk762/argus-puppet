@@ -7,7 +7,8 @@ publishes it on the host's loopback (see [deploy.md](deploy.md)). The app is `ar
 
 Every request and response body is a type from `src/argus_puppet/models.py`, the wire contract. Its field
 descriptions are authoritative and are rendered to `schema/puppet-wire.schema.json`. Top-level documents carry
-`puppet_version` (currently `"1.0"`); a 1.x reader ignores fields it does not know.
+`puppet_version` (currently `"1.1"`); a 1.x reader ignores fields it does not know, and every 1.x reader accepts a
+1.0 document. 1.1 added `PersonPose.labels` (see [`POST /pose`](#post-pose)).
 
 ## Routes
 
@@ -34,7 +35,7 @@ curl -s http://<PUPPET_HOST>:8220/health
 ```
 
 ```json
-{"puppet_version": "1.0", "version": "0.1.0", "read_only": false,
+{"puppet_version": "1.1", "version": "0.2.0", "read_only": false,
  "models": {"dwpose-l-384x288": true, "dwpose-m-256x192": true, "yolox_m": true, "yolox_nano": true},
  "pose_model": "dwpose-l-384x288", "detector_model": "yolox_m",
  "provider": null, "device": "cpu", "gpu_coordinator": "none", "free_vram_mb": null}
@@ -79,6 +80,19 @@ The answer is a `PoseResult`: the same document as a sidecar. The README's [side
 shows one; every field is described in `models.py`. At most `ARGUS_PUPPET_MAX_PEOPLE` people (default 20) are kept
 per image, those with the highest detector scores; the rest are dropped, not refused.
 
+Every person carries `labels`, the coarse `stance`, `arms` and `facing` of their keypoints
+([metrics.md](metrics.md#labels); `pose_labels` at the default joint score of 0.3), so a caller needs no second
+`/stats` call for them. `labels` is new in wire 1.1: a 1.0 document (an older sidecar) has none, and readers must
+treat it as optional. It is informational: `/stats`, `/compare` and library builds recompute labels from the
+keypoints with their own `params` and never read the stored ones.
+
+```json
+{"bbox": [151.2, 38.6, 190.4, 662.0], "det_score": 0.9, "primary": true,
+ "keypoints": [[243.1, 101.7, 0.95], "... 133 in all"],
+ "part_scores": {"body": 0.78, "feet": 0.45, "face": 0.99, "left_hand": 0.69, "right_hand": 0.71},
+ "labels": {"stance": "standing", "arms": "down", "facing": "front"}}
+```
+
 | Status | When |
 |---|---|
 | 200 | Posed. An image with nobody in it is still 200, with `people: []` and `primary: null` |
@@ -113,7 +127,7 @@ and one `ImageOutcome` per image. Images are `.jpg`, `.jpeg`, `.png` and `.webp`
 
 | Outcome reason | Status | Why |
 |---|---|---|
-| `exists` | skipped | A sidecar is already there and `overwrite` is false |
+| `exists` | skipped | A sidecar is already there and `overwrite` is false. An older sidecar (a wire 1.0 one, without `labels`) is kept as it is too: pass `overwrite` to re-pose it |
 | `sidecar_collision` | skipped | Two images share a stem (`a.jpg`, `a.png`) and so a sidecar; only the first in sorted order is posed |
 | `max_images` | skipped | The run reached `ARGUS_PUPPET_MAX_SCAN_IMAGES` (default 2000) images; `truncated` is true. Call again to continue: posed images are then skipped as `exists` |
 | `outside_root` | skipped | The image resolves outside the data root (a symlink) |
@@ -221,7 +235,7 @@ Each set counts against the set cap separately, so one request can carry two set
 One pose to an OpenPose-convention skeleton PNG for a pose ControlNet.
 
 ```json
-{"pose": {"puppet_version": "1.0", "image": "photo.jpg", "...": "a whole PoseResult"},
+{"pose": {"puppet_version": "1.1", "image": "photo.jpg", "...": "a whole PoseResult"},
  "options": {"width": 1024, "height": 1024, "face": false, "stroke_scale": "auto"}}
 ```
 

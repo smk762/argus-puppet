@@ -21,6 +21,7 @@ from argus_puppet.models import (
     MetricParams,
     PersonPose,
     PoseCluster,
+    PoseLabels,
     PoseLibrary,
     PoseLibraryEntry,
     PoseMatch,
@@ -284,3 +285,20 @@ def test_schema_covers_the_top_level_payloads() -> None:
     assert "puppet_version" in schema["$defs"]["ScanSummary"]["properties"]
     assert "puppet_version" in schema["$defs"]["PoseResult"]["properties"]
     assert "puppet_version" not in schema["$defs"]["PersonPose"]["properties"]
+
+
+def test_wire_1_1_adds_optional_person_labels() -> None:
+    assert PUPPET_VERSION == "1.1"
+    schema = json.loads(render_wire_schema())
+    person = schema["$defs"]["PersonPose"]
+    assert "labels" in person["properties"] and "labels" not in person.get("required", [])
+    # a 1.0 payload (no labels anywhere) still reads, with labels null
+    data = json.loads(result().model_dump_json())
+    data["puppet_version"] = "1.0"
+    for p in data["people"]:
+        p.pop("labels", None)
+    old = PoseResult.model_validate(data)
+    assert old.puppet_version == "1.0" and all(p.labels is None for p in old.people)
+    # and a labelled person round-trips
+    labelled = result().people[0].model_copy(update={"labels": PoseLabels(stance="seated", arms="down")})
+    assert PersonPose.model_validate_json(labelled.model_dump_json()).labels == labelled.labels

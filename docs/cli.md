@@ -125,7 +125,7 @@ $ argus-puppet compare [OPTIONS] {outputs} {reference}
 
 **Options**:
 
-* `--threshold <float>`: Close pose match distance, torso units [0.08]
+* `--threshold <float>`: Close pose match distance, torso units [0.04]
 * `--recursive / --no-recursive`: Include subfolders  [default: recursive]
 * `--extract`: Pose images that have no sidecar yet, first
 * `--device <str>`: Where to run extraction: auto, cpu, cuda (default: settings)
@@ -296,7 +296,7 @@ $ argus-puppet library build [OPTIONS] {folder}
 **Options**:
 
 * `-o, --out <path>`: Where to write the library JSON  [required]
-* `--dedupe-threshold <float>`: Drop poses closer than this to a better one (torso units; 0 = off)  [default: 0.08]
+* `--dedupe-threshold <float>`: Drop poses closer than this to a better one (torso units; 0 = off) [0.04]
 * `--max-entries <int range>`: Keep a diverse subset of this size  [x&gt;=1]
 * `--min-body-score <float>`: Minimum mean body-joint score of a pose  [default: 0.3]
 * `--created-from <str>`: Provenance note, e.g. &#x27;CC0 photos of adults&#x27;

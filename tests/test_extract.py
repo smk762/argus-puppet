@@ -16,7 +16,7 @@ from PIL import Image
 
 from argus_puppet import estimator as estimator_mod
 from argus_puppet import extract, runtime
-from argus_puppet.models import PoseResult, sidecar_path
+from argus_puppet.models import PUPPET_VERSION, PoseResult, sidecar_path
 
 
 def _write(path: Path, data: bytes) -> Path:
@@ -283,3 +283,61 @@ def test_scan_summarises(settings, fake, folder) -> None:
     s = extract.scan(folder, settings=settings, estimator=fake, label="set")
     assert (s.root, s.images, s.written, s.people) == ("set", 3, 1, 2)
     assert s.skipped == {"exists": 1} and s.failed == {"unreadable": 1} and not s.truncated
+
+
+# ── labels (wire 1.1) ────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def _labelled_fake() -> FakeEstimator:
+    from posegen import make
+
+    from argus_puppet.models import PersonPose
+
+    standing = PersonPose.from_array(make("standing", tx=40, ty=30, scale=8), bbox=(30, 5, 20, 50), det_score=0.9)
+    arms_up = PersonPose.from_array(make("arms_up", tx=15, ty=30, scale=5), bbox=(8, 10, 14, 30), det_score=0.8)
+    return FakeEstimator(people=[standing, arms_up])
+
+
+def test_every_person_is_labelled_from_their_keypoints(settings) -> None:
+    from argus_puppet.labels import pose_labels
+
+    r = extract.pose_image(draw_image(64, 64), settings=settings, estimator=_labelled_fake())
+    assert len(r.people) == 2
+    for p in r.people:
+        assert p.labels is not None and p.labels == pose_labels(p.keypoints_array())
+    assert r.people[0].labels.stance == "standing" and r.people[1].labels.arms == "up"
+
+
+def test_labels_are_recomputed_even_when_the_estimator_supplies_some(settings) -> None:
+    from argus_puppet.labels import pose_labels
+    from argus_puppet.models import PoseLabels
+
+    fake = _labelled_fake()
+    fake.people = [p.model_copy(update={"labels": PoseLabels(stance="lying", arms="out")}) for p in fake.people]
+    r = extract.pose_image(draw_image(64, 64), settings=settings, estimator=fake)
+    assert [p.labels for p in r.people] == [pose_labels(p.keypoints_array()) for p in r.people]
+
+
+def test_sidecars_carry_labels_and_a_1_0_sidecar_is_kept_unless_overwrite(settings, tmp_path) -> None:
+    root = tmp_path / "imgs"
+    _write(root / "a.png", draw_image(64, 64))
+    _write(root / "b.png", draw_image(64, 64))
+    old = extract.pose_image(root / "a.png", settings=settings, estimator=_labelled_fake())
+    payload = old.model_dump(mode="json")
+    payload["puppet_version"] = "1.0"
+    for p in payload["people"]:
+        del p["labels"]
+    old_text = json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    (root / "a.pose.json").write_text(old_text, encoding="utf-8")
+
+    summary = extract.scan(root, settings=settings, estimator=_labelled_fake())
+    assert summary.skipped == {"exists": 1} and summary.written == 1
+    assert (root / "a.pose.json").read_text(encoding="utf-8") == old_text  # not rewritten just to add labels
+    kept = PoseResult.model_validate_json(old_text)
+    assert kept.puppet_version == "1.0" and all(p.labels is None for p in kept.people)
+    fresh = json.loads((root / "b.pose.json").read_text(encoding="utf-8"))
+    assert all(set(p["labels"]) == {"stance", "arms", "facing"} for p in fresh["people"])
+
+    extract.scan(root, settings=settings, estimator=_labelled_fake(), overwrite=True)
+    redone = PoseResult.model_validate_json((root / "a.pose.json").read_text(encoding="utf-8"))
+    assert redone.puppet_version == PUPPET_VERSION and all(p.labels is not None for p in redone.people)
