@@ -1,0 +1,76 @@
+# argus-puppet: the pose service on :8220 (docs/deploy.md).
+#
+#   docker compose up -d                                   # the CPU image
+#   docker compose --profile gpu up -d puppet-gpu          # the CUDA image instead (needs the NVIDIA runtime)
+#   docker compose run --rm puppet argus-puppet models fetch   # first run: download the pinned models into the volume
+#
+# Run one of the two services, not both: they publish the same host port and share the model volume.
+#
+# Published on 127.0.0.1 only by default. There is no auth: reaching the port is host access. To serve the LAN, set
+# PUPPET_PUBLISH to an address behind your proxy, name the browser origins in ARGUS_PUPPET_CORS_ORIGINS and any DNS
+# names a page reaches puppet by in ARGUS_PUPPET_TRUSTED_HOSTS; consider ARGUS_PUPPET_READ_ONLY=1.
+
+x-puppet: &puppet
+  restart: unless-stopped
+  ports:
+    - "${PUPPET_PUBLISH:-127.0.0.1:8220}:8220"
+  environment: &puppet-env
+    ARGUS_PUPPET_MODEL_DIR: /models
+    ARGUS_PUPPET_READ_ONLY: ${ARGUS_PUPPET_READ_ONLY:-0}
+    ARGUS_PUPPET_CORS_ORIGINS: ${ARGUS_PUPPET_CORS_ORIGINS:-}
+    ARGUS_PUPPET_TRUSTED_HOSTS: ${ARGUS_PUPPET_TRUSTED_HOSTS:-}
+    # The only root POST /pose/scan may read (and write sidecars) under. Empty: the route refuses. Set it to /data
+    # together with the bind below.
+    ARGUS_PUPPET_DATA_ROOT: ${ARGUS_PUPPET_DATA_ROOT:-}
+  volumes:
+    - puppet-models:/models
+    # The data root. Read-only, POST /pose/scan can read images but not write its <stem>.pose.json sidecars; drop
+    # the :ro for scans that write. The container runs as uid 10001, which needs read (and for scans, write) access.
+    # - ${PUPPET_DATA_DIR:-./data}:/data:ro
+
+services:
+  puppet:
+    <<: *puppet
+    image: ghcr.io/smk762/argus-puppet:${PUPPET_TAG:-latest}
+    build:
+      context: .
+      args:
+        GPU: "0"
+
+  puppet-gpu:
+    <<: *puppet
+    profiles: ["gpu"]
+    image: ghcr.io/smk762/argus-puppet:${PUPPET_TAG:-latest}-gpu
+    build:
+      context: .
+      args:
+        GPU: "1"
+    environment:
+      <<: *puppet-env
+      ARGUS_PUPPET_DEVICE: ${ARGUS_PUPPET_DEVICE:-cuda}
+      # Cap on each ONNX Runtime CUDA session's arena, in MB (empty: puppet's default).
+      ARGUS_PUPPET_GPU_MEM_LIMIT_MB: ${ARGUS_PUPPET_GPU_MEM_LIMIT_MB:-}
+      # Share the card with the rest of the suite through argus-iris, the GPU broker (docs/deploy.md). Unset is
+      # "none": no gating. The token belongs in the host's .env, never in this file.
+      # ARGUS_GPU_COORDINATOR: ${ARGUS_GPU_COORDINATOR:-none}   # none | lease | broker
+      # ARGUS_GPU_BROKER_URL: ${ARGUS_GPU_BROKER_URL:-}         # e.g. http://<GPU_HOST>:<IRIS_PORT>
+      # ARGUS_GPU_BROKER_TOKEN: ${ARGUS_GPU_BROKER_TOKEN:-}
+      # ARGUS_GPU_TENANT_MANIFEST: ${ARGUS_GPU_TENANT_MANIFEST:-/app/gpu-tenant.yaml}
+      # ARGUS_GPU_BROKER_FALLBACK: ${ARGUS_GPU_BROKER_FALLBACK:-lease}
+      # The "lease" coordinator's lock file: mount one host directory into every GPU service (see volumes below).
+      # ARGUS_GPU_LEASE_PATH: /run/argus-gpu/argus-gpu.lock
+      # ARGUS_GPU_LEASE_TIMEOUT_S: ${ARGUS_GPU_LEASE_TIMEOUT_S:-300}
+    # For ARGUS_GPU_COORDINATOR=lease, add the shared lock directory:
+    # volumes:
+    #   - puppet-models:/models
+    #   - ${ARGUS_GPU_LOCK_DIR:-/tmp/argus-gpu}:/run/argus-gpu
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  puppet-models:
