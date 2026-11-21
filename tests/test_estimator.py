@@ -138,6 +138,15 @@ def test_detect_people_feeds_bgr_and_maps_boxes_back() -> None:
     assert boxes[0, 4] == pytest.approx(0.9)
 
 
+def test_a_box_that_clips_to_nothing_is_not_a_person() -> None:
+    """The letterbox pads below a wide image: a confident box out there clips to zero height in the image."""
+    head = _yolox_head((64, 64), {9: (1.0, 0.9), 57: (1.0, 0.95)})  # 57: cell (x=1, y=7), in the grey padding
+    session = FakeSession("images", [1, 3, 64, 64], lambda x: [head[None]])
+    boxes = est.detect_people(session, np.zeros((32, 128, 3), np.uint8), score_thr=0.3, nms_iou=0.45, input_hw=(0, 0))
+    assert boxes.shape == (1, 5) and boxes[0, 4] == pytest.approx(0.9)
+    assert ((boxes[:, 2] - boxes[:, 0] >= est.MIN_BOX_PX) & (boxes[:, 3] - boxes[:, 1] >= est.MIN_BOX_PX)).all()
+
+
 # ── pose ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 

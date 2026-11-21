@@ -35,6 +35,9 @@ YOLOX_STRIDES = (8, 16, 32)
 PERSON_CLASS = 0
 BBOX_PADDING = 1.25
 SIMCC_SPLIT_RATIO = 2.0
+# A detector box narrower or shorter than this, once clipped to the image, is not a person: a confident box over the
+# letterbox padding clips to nothing, and the pose model would still hand back 133 confident points for it.
+MIN_BOX_PX = 2.0
 
 
 @runtime_checkable
@@ -164,7 +167,8 @@ def _input_hw(session: Any, fallback: tuple[int, int]) -> tuple[int, int]:
 def detect_people(
     session: Any, rgb: np.ndarray, *, score_thr: float, nms_iou: float, input_hw: tuple[int, int]
 ) -> np.ndarray:
-    """Person boxes ``[N, 5]`` (x1, y1, x2, y2, score) in image pixels, highest score first."""
+    """Person boxes ``[N, 5]`` (x1, y1, x2, y2, score) in image pixels, highest score first; a box under
+    :data:`MIN_BOX_PX` on either side after clipping is dropped."""
     in_h, in_w = _input_hw(session, input_hw)
     canvas, r = letterbox(rgb, in_h, in_w)
     x = canvas[..., ::-1].astype(np.float32)  # the detector was trained on BGR, 0-255
@@ -180,6 +184,8 @@ def detect_people(
     h, w = rgb.shape[:2]
     boxes[:, [0, 2]] = boxes[:, [0, 2]].clip(0, w)
     boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, h)
+    real = (boxes[:, 2] - boxes[:, 0] >= MIN_BOX_PX) & (boxes[:, 3] - boxes[:, 1] >= MIN_BOX_PX)
+    boxes, scores = boxes[real], scores[real]
     return np.concatenate([boxes, scores[:, None]], 1).astype(np.float32).reshape(-1, 5)
 
 
