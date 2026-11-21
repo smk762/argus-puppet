@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from argus_puppet import gpu, registry, runtime
 from argus_puppet.config import Settings
-from argus_puppet.models import Health, PoseResult, ScanSummary
+from argus_puppet.models import PUPPET_VERSION, Health, PoseResult, ScanSummary
 from argus_puppet.server.app import SCAN_JSON_BYTES, create_app, parse_face_hint
 
 
@@ -43,6 +43,8 @@ def test_pose_raw_bytes(client, fake) -> None:
     r = PoseResult.model_validate(reply.json())
     assert (r.image, r.width, r.height, len(r.people), r.primary) == ("upload", 70, 50, 2, 0)
     assert fake.calls == 1
+    assert r.puppet_version == PUPPET_VERSION
+    assert all(set(p["labels"]) == {"stance", "arms", "facing"} for p in reply.json()["people"])
 
 
 def test_pose_octet_stream_and_no_content_type(client) -> None:

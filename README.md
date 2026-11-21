@@ -113,7 +113,7 @@ it apart from other packages' `<stem>.json` sidecars). It is a `PoseResult`, the
 
 ```jsonc
 {
-  "puppet_version": "1.0",
+  "puppet_version": "1.1",
   "image": "woman_yoga.jpg",
   "image_sha256": "…",
   "width": 480, "height": 720,
@@ -122,7 +122,8 @@ it apart from other packages' `<stem>.json` sidecars). It is a `PoseResult`, the
   "people": [
     {"bbox": [151.2, 38.6, 190.4, 662.0], "det_score": 0.9, "primary": true,
      "keypoints": [[243.1, 101.7, 0.95], …],          // exactly 133 (x, y, score) triples
-     "part_scores": {"body": 0.78, "feet": 0.45, "face": 0.99, "left_hand": 0.69, "right_hand": 0.71}}
+     "part_scores": {"body": 0.78, "feet": 0.45, "face": 0.99, "left_hand": 0.69, "right_hand": 0.71},
+     "labels": {"stance": "standing", "arms": "down", "facing": "front"}}  // since 1.1; absent in 1.0 sidecars
   ],
   "estimator": {"name": "topdown", "provider": "CPUExecutionProvider",
                 "detector": {"name": "yolox_m", "sha256": "21ff6c…", "license": "Apache-2.0", "bytes": 101259744},
@@ -133,7 +134,8 @@ it apart from other packages' `<stem>.json` sidecars). It is a `PoseResult`, the
 
 Keypoints are `(x, y, score)` in the image's pixels after EXIF orientation; a point the model could not place has
 score 0. Boxes are `[x, y, w, h]`. People are listed largest first, and `primary` picks the main subject by the same
-rule argus-curator uses for its primary face. The authoritative field list is `src/argus_puppet/models.py`, rendered
+rule argus-curator uses for its primary face. Each person's `labels` are the coarse stance, arms and facing
+of [docs/metrics.md](docs/metrics.md#labels). The authoritative field list is `src/argus_puppet/models.py`, rendered
 to [`schema/puppet-wire.schema.json`](schema/puppet-wire.schema.json) (`argus-puppet schema`); CI fails if the two
 drift. A 1.x reader ignores unknown fields, so it accepts any later 1.y document.
 

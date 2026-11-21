@@ -260,3 +260,22 @@ def test_compute_runs_off_the_event_loop(settings, monkeypatch) -> None:
     monkeypatch.setattr(metrics, "pose_set_stats", probe)
     assert client(settings).post("/stats", json={"results": body(poses())}).status_code == 200
     assert seen == ["thread"]
+
+
+def test_render_takes_people_with_or_without_labels(settings) -> None:
+    from argus_puppet.labels import pose_labels
+
+    r = poses(n=1)[0]
+    plain = r.model_dump(mode="json")
+    labelled = r.model_copy(
+        update={"people": [p.model_copy(update={"labels": pose_labels(p.keypoints_array())}) for p in r.people]}
+    ).model_dump(mode="json")
+    assert "labels" in labelled["people"][0] and labelled["people"][0]["labels"] is not None
+    for p in plain["people"]:
+        p.pop("labels", None)  # a 1.0 sidecar
+    c = client(settings)
+    opts = {"width": 128, "height": 128}
+    assert _png(c.post("/render", json={"pose": plain, "options": opts})).any()
+    assert c.post("/render", json={"pose": plain, "options": opts}).content == (
+        c.post("/render", json={"pose": labelled, "options": opts}).content
+    )

@@ -41,6 +41,7 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | A model session built from bytes other than those just hashed (a memo vouching, or the file reopened after the check) | `tests/test_runtime.py::test_load_session_hashes_the_bytes_it_loads`, `::test_the_hash_memo_is_invalidated_by_any_change_to_the_file` |
 | A pre-release tag moving `latest` / `latest-gpu` | `tests/test_must_never.py::test_only_a_final_release_moves_latest` |
 | A tracked image, video or model file, or an image hidden in a base64 literal | `tests/test_must_never.py` (`git ls-files` media/model suffixes; base64 runs decoded for image magic) |
+| A stored `PersonPose.labels` read by the set metrics (a 1.0 sidecar and a 1.1 one must give identical stats, compare and library output) | `tests/test_metrics.py::test_stored_person_labels_never_change_stats_compare_or_library` |
 | A wire schema that drifts from `models.py` | CI `post-test`: `argus-puppet schema --check`; `tests/test_cli.py` |
 
 ## Layout
@@ -78,22 +79,25 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   folder run and hands it back on `should_yield()`.
 - `extract.py` — the library API: `pose_image(bytes|path) -> PoseResult`, `pose_folder(root) -> Iterator[ImageOutcome]`
   (atomic sorted-key sidecars, skip-existing, `sidecar_collision`, unreadable images reported), `scan() -> ScanSummary`.
-  Images decode through `argus_cortex.limits.open_image` with EXIF orientation.
+  Images decode through `argus_cortex.limits.open_image` with EXIF orientation. `build_result` fills every person's
+  `PersonPose.labels` (wire 1.1) from `labels.pose_labels`; skip-existing keeps a 1.0 sidecar as it is.
 - `sidecars.py` — read sidecars back: `find_sidecars`, `load_sidecar(s)`, `load_sidecars_with_paths`,
   `image_for_sidecar` (the image a sidecar sits beside).
 - `embedding.py` — the pose vector (body-17, hip-centred, robust torso scale, masked joints) and the mirror-invariant
   distance (`pose_distance`, chunked `pairwise_distances`/`cross_distances`). Pure numpy. See `docs/pose-vector.md`.
-- `labels.py` — `pose_labels(kp)`: stance / arms / facing from geometry rules (named threshold constants).
+- `labels.py` — `pose_labels(kp)`: stance / arms / facing from geometry rules (named threshold constants). The one
+  source of labels: metrics, compare and library always recompute from keypoints and never read a stored
+  `PersonPose.labels` (`tests/test_metrics.py::test_stored_person_labels_never_change_stats_compare_or_library`).
 - `metrics.py` — `pose_set_stats(results, params=)`: diversity, average-linkage clusters (NN-chain, `average_linkage`,
   `cluster_ids`), coverage, 2D projection; `keypoint_distance_matrix` (the library's distance), `shared_estimator`.
-- `compare.py` — `compare_pose_sets(outputs, reference, threshold=0.08, params=)`: nearest reference per output (null
+- `compare.py` — `compare_pose_sets(outputs, reference, threshold=0.04, params=)`: nearest reference per output (null
   when none is comparable), memorised share over matched outputs, coverage JS divergence. See `docs/metrics.md`.
 - `render.py` — OpenPose-convention control images from scratch (numpy + Pillow): `render_pose/array/png`,
   `canvas_size`, `canvas_transform`; `RenderOptions` carries fit/stroke/margin/primary, keywords override. Limbs
   reproduce `cv2.ellipse2Poly` + `fillConvexPoly` in numpy (`_ellipse_polygon`, `_fill_convex_polygon`; pixel-exact
   at stroke scale 1, never import OpenCV); geometry is truncated on the annotator's grid (canvas / k) as it does.
 - `sampling.py` — generic `deduplicate` and `farthest_point_sample` over a distance matrix (NaN = incomparable).
-- `library.py` — `build_library` (real distance, `pose_labels`, average-linkage clusters and 0.08 dedupe by default;
+- `library.py` — `build_library` (real distance, `pose_labels`, average-linkage clusters and 0.04 dedupe by default;
   optional `AgeGate`), `sample`, `render_entries`, `save_library`/`load_library`. See `docs/conditioning.md`.
 - `age.py` — the age fail-safe: `AgeEstimator` protocol, `HttpAgeEstimator` (argus-curator `POST /faces?body=true` at
   `Settings.age_url` via `argus_cortex.net.fetch`, one host allowed, timeout + deadline, no redirects),

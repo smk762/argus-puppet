@@ -318,7 +318,7 @@ def _print_stats(folder: Path, s: PoseSetStats, out: Path | None) -> None:
 def compare(
     outputs: Path = Argument(..., help="Folder of output images' sidecars (e.g. a LoRA's samples)"),
     reference: Path = Argument(..., help="Folder of reference (training) images' sidecars"),
-    threshold: float | None = Option(None, "--threshold", help="Close pose match distance, torso units [0.08]"),
+    threshold: float | None = Option(None, "--threshold", help="Close pose match distance, torso units [0.04]"),
     recursive: bool = Option(True, "--recursive/--no-recursive", help="Include subfolders"),
     run_extract: bool = Option(False, "--extract", help="Pose images that have no sidecar yet, first"),
     device: str | None = Option(None, "--device", help=DEVICE_HELP),
@@ -534,8 +534,10 @@ def _size(raw: str) -> tuple[int, int]:
 def library_build(
     folder: Path = Argument(..., help="A folder of images with <stem>.pose.json sidecars"),
     out: Path = Option(..., "--out", "-o", help="Where to write the library JSON"),
-    dedupe_threshold: float = Option(
-        0.08, "--dedupe-threshold", help="Drop poses closer than this to a better one (torso units; 0 = off)"
+    dedupe_threshold: float | None = Option(
+        None,
+        "--dedupe-threshold",
+        help="Drop poses closer than this to a better one (torso units; 0 = off) [0.04]",
     ),
     max_entries: int | None = Option(None, "--max-entries", min=1, help="Keep a diverse subset of this size"),
     min_body_score: float = Option(0.3, "--min-body-score", help="Minimum mean body-joint score of a pose"),
@@ -554,8 +556,10 @@ def library_build(
 ) -> None:
     """Build a pose library: one entry per image's primary pose, labelled, deduplicated and clustered."""
     from argus_puppet import sidecars
-    from argus_puppet.library import AgeGate, build_library, save_library
+    from argus_puppet.library import DEFAULT_DEDUPE_THRESHOLD, AgeGate, build_library, save_library
 
+    if dedupe_threshold is None:
+        dedupe_threshold = DEFAULT_DEDUPE_THRESHOLD
     if dedupe_threshold < 0:
         raise fail("--dedupe-threshold must be >= 0")
     gate = None

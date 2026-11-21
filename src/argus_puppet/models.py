@@ -37,7 +37,8 @@ from argus_puppet.embedding import (
 from argus_puppet.skeleton import LAYOUT, NUM_KEYPOINTS, part_mean_scores
 
 # 1.0: initial contract.
-PUPPET_VERSION = "1.0"
+# 1.1: PersonPose.labels (stance / arms / facing per person, filled by extraction; optional, null in 1.0 payloads).
+PUPPET_VERSION = "1.1"
 SUPPORTED_PUPPET_MAJORS: tuple[str, ...] = ("1",)
 WIRE_TITLE = "argus-puppet wire contract"
 # The committed schema, relative to the repo root (``argus-puppet schema`` writes it, ``--check`` compares).
@@ -137,6 +138,21 @@ class PartScores(BaseModel):
     right_hand: Unit = Field(..., description="Mean score of the 21 right-hand points (112-132).")
 
 
+Stance = Literal["standing", "jumping", "crouching", "seated", "lying", "unknown"]
+Arms = Literal["up", "out", "down", "mixed", "unknown"]
+Facing = Literal["front", "back", "left", "right", "unknown"]
+
+
+class PoseLabels(BaseModel):
+    """Coarse labels derived from keypoints (geometry rules, not a classifier). 'unknown' when the joints a rule
+    needs are not confident enough. Facing is the subject's, as seen by the camera: 'left' means they face the
+    image's left."""
+
+    stance: Stance = "unknown"
+    arms: Arms = "unknown"
+    facing: Facing = "unknown"
+
+
 class PersonPose(BaseModel):
     """One detected person and their whole-body keypoints."""
 
@@ -145,6 +161,13 @@ class PersonPose(BaseModel):
     keypoints: Keypoints
     primary: bool = Field(False, description="Whether this is the image's primary subject (PoseResult.primary).")
     part_scores: PartScores = Field(..., description="Mean keypoint score per part.")
+    labels: PoseLabels | None = Field(
+        None,
+        description="Coarse stance / arms / facing labels from this person's keypoints (labels.pose_labels at the "
+        "default joint score), filled by extraction since puppet_version 1.1; null in 1.0 payloads. Informational: "
+        "the set metrics (/stats, /compare) and library builds always recompute labels from the keypoints and never "
+        "read this field.",
+    )
 
     @classmethod
     def from_array(
@@ -208,21 +231,7 @@ class PoseResult(_Versioned):
         return None if self.primary is None else self.people[self.primary]
 
 
-# ── labels and set metrics ───────────────────────────────────────────────────────────────────────────────────────
-
-Stance = Literal["standing", "jumping", "crouching", "seated", "lying", "unknown"]
-Arms = Literal["up", "out", "down", "mixed", "unknown"]
-Facing = Literal["front", "back", "left", "right", "unknown"]
-
-
-class PoseLabels(BaseModel):
-    """Coarse labels derived from keypoints (geometry rules, not a classifier). 'unknown' when the joints a rule
-    needs are not confident enough. Facing is the subject's, as seen by the camera: 'left' means they face the
-    image's left."""
-
-    stance: Stance = "unknown"
-    arms: Arms = "unknown"
-    facing: Facing = "unknown"
+# ── set metrics ──────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 class Coverage(BaseModel):
@@ -682,7 +691,7 @@ class CompareRequest(BaseModel):
     outputs: PoseSetSource
     reference: PoseSetSource
     threshold: float | None = Field(
-        None, ge=0.0, description="Close pose match distance (default: compare.DEFAULT_CLOSE_THRESHOLD, 0.08)."
+        None, ge=0.0, description="Close pose match distance (default: compare.DEFAULT_CLOSE_THRESHOLD, 0.04)."
     )
     params: MetricParams = Field(default_factory=MetricParams, description="Metric thresholds (default: suite's).")
 

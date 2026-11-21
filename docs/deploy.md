@@ -83,7 +83,7 @@ VERSION=<version> .`). Without `VERSION` the image reports `0.0.0.dev0`.
 verified. It also gives the provider and device, free VRAM on a GPU, and read-only mode:
 
 ```json
-{"puppet_version": "1.0", "version": "0.1.0", "read_only": false,
+{"puppet_version": "1.1", "version": "0.2.0", "read_only": false,
  "models": {"dwpose-l-384x288": true, "dwpose-m-256x192": true, "yolox_m": true, "yolox_nano": true},
  "pose_model": "dwpose-l-384x288", "detector_model": "yolox_m",
  "provider": "CUDAExecutionProvider", "device": "cuda", "gpu_coordinator": "none", "free_vram_mb": 22544}

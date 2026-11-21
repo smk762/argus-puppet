@@ -403,3 +403,41 @@ def test_every_param_is_honoured_and_recorded() -> None:
     assert pose_set_stats(hidden).mean_pairwise_distance > 0  # the default (6 shared) still compares them
     no_limbs = pose_set_stats(hidden, params=MetricParams(min_shared_limb_joints=7))
     assert no_limbs.mean_pairwise_distance == 0.0  # only 6 limb joints left in each pose
+
+
+# ── stored labels are never trusted (wire 1.1) ──────────────────────────────────────────────────────────────────
+
+
+def _with_labels(rs, make_labels):
+    return [
+        r.model_copy(update={"people": [p.model_copy(update={"labels": make_labels(p)}) for p in r.people]}, deep=True)
+        for r in rs
+    ]
+
+
+@pytest.mark.parametrize("params", [MetricParams(), MetricParams(min_joint_score=0.6, min_usable_joints=6)])
+def test_stored_person_labels_never_change_stats_compare_or_library(params) -> None:
+    from argus_puppet.compare import compare_pose_sets
+    from argus_puppet.labels import pose_labels
+    from argus_puppet.library import build_library
+    from argus_puppet.models import PoseLabels
+
+    rng = np.random.default_rng(31)
+    v10 = sample(rng, NAMES, 30)  # a 1.0 sidecar: no labels
+    ref10 = sample(rng, NAMES, 20, prefix="r")
+    assert all(p.labels is None for r in v10 + ref10 for p in r.people)
+
+    def v11(rs):  # what extraction writes today
+        return _with_labels(rs, lambda p: pose_labels(p.keypoints_array()))
+
+    def poisoned(rs):  # stale or tampered labels
+        return _with_labels(rs, lambda p: PoseLabels(stance="lying", arms="mixed", facing="back"))
+
+    want_stats = pose_set_stats(v10, params=params).model_dump()
+    want_cmp = compare_pose_sets(v10, ref10, params=params).model_dump()
+    want_lib = build_library(v10).library.model_dump()
+    for variant in (v11, poisoned):
+        assert pose_set_stats(variant(v10), params=params).model_dump() == want_stats
+        assert compare_pose_sets(variant(v10), variant(ref10), params=params).model_dump() == want_cmp
+        assert build_library(variant(v10)).library.model_dump() == want_lib
+    assert {i["labels"]["stance"] for i in want_stats["items"]} - {"lying", "unknown"}  # the poison is a change

@@ -1,13 +1,16 @@
 """The library API: pose one image, or a folder of images into ``<stem>.pose.json`` sidecars.
 
 * :func:`pose_image` takes bytes or a path and returns a :class:`~argus_puppet.models.PoseResult`. It writes nothing.
+  Every person carries ``labels`` (:func:`argus_puppet.labels.pose_labels` at the default joint score).
 * :func:`pose_folder` walks a folder (or one file) in sorted order and yields one
   :class:`~argus_puppet.models.ImageOutcome` per image,
   writing each sidecar atomically (temp file + ``os.replace``, sorted keys). An existing sidecar is kept unless
-  ``overwrite``; two images sharing a stem (``a.jpg`` + ``a.png``) would share a sidecar, so only the first in sorted
-  order is posed and the other is skipped (``sidecar_collision``). An unreadable image, or a sidecar that cannot be
-  written (``unwritable``: an image in a folder that cannot take a file is not posed at all), is reported, never
-  fatal; a model that cannot run or a GPU lease that is not granted stops the run (raised).
+  ``overwrite`` (a sidecar written by an older version, e.g. a puppet_version 1.0 one without ``PersonPose.labels``,
+  is kept as it is: pass ``overwrite`` to re-pose it); two images sharing a stem (``a.jpg`` + ``a.png``) would share
+  a sidecar, so only the first in sorted order is posed and the other is skipped (``sidecar_collision``). An
+  unreadable image, or a sidecar that cannot be written (``unwritable``: an image in a folder that cannot take a file
+  is not posed at all), is reported, never fatal; a model that cannot run or a GPU lease that is not granted stops
+  the run (raised).
 * :func:`scan` runs :func:`pose_folder` to the end and returns a :class:`~argus_puppet.models.ScanSummary`.
 
 Images are decoded through :func:`argus_cortex.limits.open_image` (the pixel and byte caps from settings), with
@@ -36,6 +39,7 @@ from argus_puppet import estimator as estimator_mod
 from argus_puppet import gpu
 from argus_puppet.config import Settings
 from argus_puppet.estimator import to_rgb
+from argus_puppet.labels import pose_labels
 from argus_puppet.models import SKIP_MAX_IMAGES, ImageOutcome, PoseResult, ScanSummary, sidecar_path
 from argus_puppet.primary import BoxXYWH, assign_primary
 
@@ -97,9 +101,11 @@ def build_result(
     estimator: estimator_mod.Estimator,
     face_hint: BoxXYWH | None = None,
 ) -> PoseResult:
-    """Run *estimator* on a decoded *image* and wrap the people (largest first, one primary) in a PoseResult."""
+    """Run *estimator* on a decoded *image* and wrap the people (largest first, one primary, each labelled with
+    :func:`~argus_puppet.labels.pose_labels`) in a PoseResult."""
     people = sorted(estimator.estimate(image), key=lambda p: -_area(p.bbox))  # stable: ties keep detector order
     people, primary = assign_primary(people, face_hint=face_hint)
+    people = [p.model_copy(update={"labels": pose_labels(p.keypoints_array())}) for p in people]
     return PoseResult(
         image=name,
         image_sha256=sha256,

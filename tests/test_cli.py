@@ -365,3 +365,35 @@ def test_without_age_check_no_estimator_is_built(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("ARGUS_PUPPET_AGE_URL", "http://curator.test:8100")
     folder = _sidecar_folder(tmp_path / "set", ["standing"], images=True)
     assert runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "l.json")]).exit_code == 0
+
+
+def test_threshold_defaults_match_the_library(tmp_path, monkeypatch) -> None:
+    import typer.main
+
+    from argus_puppet import library
+    from argus_puppet.compare import DEFAULT_CLOSE_THRESHOLD
+
+    root = typer.main.get_command(app)
+    for path, flag, default in (
+        (["compare"], "--threshold", DEFAULT_CLOSE_THRESHOLD),
+        (["library", "build"], "--dedupe-threshold", library.DEFAULT_DEDUPE_THRESHOLD),
+    ):
+        cmd = root
+        for name in path:
+            cmd = cmd.commands[name]  # type: ignore[attr-defined]
+        (param,) = [p for p in cmd.params if flag in p.opts]
+        assert param.default is None and param.help.endswith(f"[{default}]"), (flag, param.help)
+
+    seen: dict = {}
+    real = library.build_library
+
+    def spy(results, **kw):
+        seen.update(kw)
+        return real(results, **kw)
+
+    monkeypatch.setattr(library, "build_library", spy)
+    folder = _sidecar_folder(tmp_path / "set", SET)
+    assert runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "l.json")]).exit_code == 0
+    assert seen["dedupe_threshold"] == library.DEFAULT_DEDUPE_THRESHOLD
+    runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "l.json"), "--dedupe-threshold", "0"])
+    assert seen["dedupe_threshold"] is None

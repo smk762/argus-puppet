@@ -182,6 +182,13 @@ degrees, so labels do not change with translation or scale. Stance and arms do n
 swaps `left` and `right`. A label is `unknown` whenever the joints its rule needs are not confident: the rules
 prefer `unknown` to a guess. The thresholds are the named constants at the top of `labels.py`.
 
+Since wire 1.1, extraction (`pose_image`, `pose_folder`, `POST /pose`, `/pose/scan`, `argus-puppet pose`) stores
+every person's labels in `PersonPose.labels`, computed by `pose_labels` at the default `min_joint_score` (0.3). That
+copy is for callers who want a person's labels without a set call. **The set metrics never read it**: `/stats`,
+`/compare` and `build_library` recompute labels from the keypoints (with the request's `min_joint_score`), so a 1.0
+sidecar without labels, a 1.1 sidecar and one whose labels predate a rule change all give identical results. An
+existing sidecar is not rewritten to add labels; re-pose with `overwrite` to refresh it.
+
 ### Stance
 
 Gravity is assumed to point down the image (a roughly level camera). For each leg with a confident hip and knee:
