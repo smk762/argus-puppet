@@ -35,6 +35,7 @@ from PIL import Image, ImageOps
 from argus_puppet import estimator as estimator_mod
 from argus_puppet import gpu
 from argus_puppet.config import Settings
+from argus_puppet.estimator import to_rgb
 from argus_puppet.models import SKIP_MAX_IMAGES, ImageOutcome, PoseResult, ScanSummary, sidecar_path
 from argus_puppet.primary import BoxXYWH, assign_primary
 
@@ -52,6 +53,7 @@ __all__ = [
     "pose_folder",
     "pose_image",
     "scan",
+    "to_rgb",
     "write_sidecar",
 ]
 
@@ -76,7 +78,7 @@ def decode(data: bytes, settings: Settings) -> Image.Image:
     try:
         img.load()
         oriented = ImageOps.exif_transpose(img)
-        return oriented.convert("RGB")
+        return to_rgb(oriented)
     except (OSError, ValueError, SyntaxError) as exc:  # truncated or corrupt past the header
         raise BadInput(f"the image could not be decoded: {exc}") from exc
     except Image.DecompressionBombError as exc:  # pragma: no cover - open_image's pixel cap comes first

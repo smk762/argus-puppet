@@ -87,9 +87,19 @@ def resample(
     return np.clip(np.rint(out), 0, 255).astype(np.uint8)
 
 
+def to_rgb(image: Image.Image) -> Image.Image:
+    """*image* as 8-bit RGB. A 16-bit greyscale PNG (``I;16``) is scaled down to 8 bits first: ``convert("RGB")``
+    clips it, turning anything brighter than 255 of 65535 white. ``I`` and ``F`` (not produced by the formats decoded
+    here, but possible from older Pillows or callers) are read on the same 16-bit scale."""
+    if image.mode.startswith("I;16") or image.mode in ("I", "F"):
+        wide = np.asarray(image, dtype=np.float64)
+        image = Image.fromarray(np.clip(np.rint(wide / 257.0), 0, 255).astype(np.uint8), "L")
+    return image.convert("RGB")
+
+
 def to_rgb_array(image: Image.Image) -> np.ndarray:
-    """``HxWx3`` uint8 RGB of an image that is already EXIF-oriented."""
-    return np.asarray(image.convert("RGB"))
+    """``HxWx3`` uint8 RGB of an image that is already EXIF-oriented (:func:`to_rgb`)."""
+    return np.asarray(to_rgb(image))
 
 
 # ── detector ─────────────────────────────────────────────────────────────────────────────────────────────────────

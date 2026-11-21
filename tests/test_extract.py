@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 from argus_cortex.limits import BadInput, TooLarge
 from conftest import FakeEstimator, RecordingCoordinator, draw_image
@@ -63,6 +64,20 @@ def test_exif_orientation_is_applied(settings, fake) -> None:
     r = extract.pose_image(buf.getvalue(), settings=settings, estimator=fake)
     assert (r.width, r.height) == (40, 60)
     assert fake.sizes == [(40, 60)]
+
+
+@pytest.mark.parametrize(("value", "expected"), [(0, 0), (1000, 4), (40000, 156), (65535, 255)])
+def test_16_bit_greyscale_is_scaled_not_clipped(settings, value, expected) -> None:
+    buf = io.BytesIO()
+    Image.new("I;16", (8, 6), value).save(buf, format="PNG")  # a 16-bit greyscale PNG
+    rgb = np.asarray(extract.decode(buf.getvalue(), settings))
+    assert rgb.shape == (6, 8, 3) and (rgb == expected).all(), (value, rgb.max())
+
+
+@pytest.mark.parametrize("mode", ["I;16", "I;16B", "I", "F"])
+def test_every_wide_mode_is_read_on_the_16_bit_scale(mode) -> None:
+    img = Image.fromarray(np.array([[0, 1000, 40000, 65535]], np.uint16)).convert("I").convert(mode)
+    assert np.asarray(extract.to_rgb(img))[0, :, 0].tolist() == [0, 4, 156, 255]
 
 
 def test_bad_and_oversized_images(settings, fake, tmp_path) -> None:
