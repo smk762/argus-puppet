@@ -68,7 +68,8 @@ def min_age_from_payload(payload: object) -> float | None:
     Raises :class:`AgeUnavailable` for anything that cannot vouch for the image: no ``faces`` list, a source other
     than MiVOLO, a body pass that did not report ``people_check: ok`` (without it an empty ``people`` list is not
     "nobody found"), a face without an estimate, or a body not matched to a face without one. A body matched to a
-    face may lack its own estimate (the face's counts); when it has one, it counts too."""
+    face (an int index into ``faces``) may lack its own estimate (the face's counts); when it has one, it counts too.
+    A body without one whose ``face_index`` is not a valid index fails closed."""
     if not isinstance(payload, dict) or not isinstance(payload.get("faces"), list):
         raise AgeUnavailable("the age check returned no faces list")
     if payload.get("source", "mivolo") != "mivolo":
@@ -92,8 +93,12 @@ def min_age_from_payload(payload: object) -> float | None:
             raise AgeUnavailable("the age check returned a malformed person")
         years = _years(person.get("age_estimate_years"))
         if years is None:
-            if person.get("face_index") is None:
+            index = person.get("face_index")
+            if index is None:
                 raise AgeUnavailable("the age check returned a person without an estimate")
+            # bool is an int: True would pass for face 1. Out of range would vouch with another face's age.
+            if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(payload["faces"]):
+                raise AgeUnavailable(f"the age check matched a person to face {index!r}, which it did not return")
             continue  # matched to a face, whose estimate is already counted
         ages.append(years)
     return min(ages) if ages else None

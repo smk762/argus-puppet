@@ -45,6 +45,13 @@ def test_the_youngest_face_or_body_counts() -> None:
         answer([face(-3)]),
         answer([face(30.0)], [{"bbox": [0, 0, 1, 1], "face_index": None, "age_estimate_years": None}]),
         answer([face(30.0)], ["junk"]),
+        # a body without its own estimate must point at a face that exists, by an int index
+        answer([face(30.0)], [{"bbox": [0, 0, 1, 1], "face_index": 1, "age_estimate_years": None}]),
+        answer([face(30.0)], [{"bbox": [0, 0, 1, 1], "face_index": -1, "age_estimate_years": None}]),
+        answer([face(30.0)], [{"bbox": [0, 0, 1, 1], "face_index": "0", "age_estimate_years": None}]),
+        answer([face(30.0)], [{"bbox": [0, 0, 1, 1], "face_index": 0.0, "age_estimate_years": None}]),
+        answer([face(30.0)], [{"bbox": [0, 0, 1, 1], "face_index": False, "age_estimate_years": None}]),
+        answer([], [{"bbox": [0, 0, 1, 1], "face_index": 0, "age_estimate_years": None}]),
     ],
 )
 def test_anything_that_cannot_vouch_is_unavailable(payload) -> None:
