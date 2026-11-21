@@ -5,8 +5,11 @@ Body pose for the Argus suite. Puppet finds every person in an image, places 133
 poses is, which poses dominate it, whether outputs sit closer to training frames' poses than those frames sit to
 each other, and skeleton control images
 that drive a pose ControlNet. It is a library, a CLI and an HTTP service on port 8220. It has no Studio stage of its
-own: it is built for argus-proof, argus-curator, argus-darkroom and the others to call, as they call argus-retina's
-detectors. None of them does yet.
+own: other packages call it over HTTP, as they call argus-retina's detectors. From their next releases, argus-proof
+(`PROOF_PUPPET_URL`) puts a pose block on its eval report and gates on `--min-pose-diversity`, argus-curator
+(`ARGUS_CURATOR_PUPPET_URL`) records pose labels and a scan-level pose cluster per image, and argus-lens
+(`LENS_POSE_URL`) uses it as a reconcile pose verifier; argus-forge, Studio and Cull read curator's pose fields.
+argus-darkroom does not call it yet.
 
 Part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus). Shared code (wire-schema versioning,
 write guards, GPU leases) comes from argus-cortex.
