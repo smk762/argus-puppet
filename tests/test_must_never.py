@@ -9,13 +9,13 @@ import re
 import subprocess
 from pathlib import Path
 
-from conftest import FakeEstimator, draw_image
+from conftest import FakeEstimator, asgi_request, draw_image, megabytes
 from fastapi.testclient import TestClient
 from starlette.routing import Route
 
 from argus_puppet import registry
 from argus_puppet.config import Settings
-from argus_puppet.server.app import create_app
+from argus_puppet.server.app import MULTIPART_OVERHEAD, create_app
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -167,6 +167,48 @@ def test_a_scan_path_escaping_the_data_root_is_refused(tmp_path) -> None:
     unrooted = create_app(dataclasses.replace(app.state.puppet.settings, data_root=None), estimator=FakeEstimator())
     with TestClient(unrooted) as client:
         assert client.post("/pose/scan", json={"path": "set"}).status_code == 409
+
+
+# --- every body is bounded: an over-cap body is refused unread, a stalled one cut off --------------------------------
+
+MB = 1024 * 1024
+# The content type each unsafe route reads; any route not listed reads JSON. A new route that reads something else
+# fails the walk below until it is listed here (and caps its body).
+BODY_TYPES: dict[str, tuple[str, ...]] = {"/pose": ("image/png", "multipart/form-data; boundary=B")}
+
+
+def _bodies(app) -> list[tuple[str, str, str]]:
+    routes = _unsafe_routes(app)
+    assert set(EXPECTED_UNSAFE) <= set(routes)
+    return [(m, p, ct) for m, p in routes for ct in BODY_TYPES.get(p, ("application/json",))]
+
+
+def test_every_unsafe_route_refuses_an_over_cap_body_without_reading_it(tmp_path) -> None:
+    """Chunked (no Content-Length): the server stops pulling at its cap, whatever the route. Declared: refused before
+    a byte is read. The largest cap here is 1 MB (+ 64 KiB multipart overhead); 32 MB are offered."""
+    app, root = _app(tmp_path, max_upload_bytes=MB, max_json_bytes=MB)
+    for method, path, content_type in _bodies(app):
+        reply = asgi_request(
+            app, path, megabytes(32, b'{"path": "set", "pad": "'), headers={"content-type": content_type}, method=method
+        )
+        assert reply.status == 413, f"{method} {path} ({content_type}) answered {reply.status}: {reply.body[:200]!r}"
+        assert reply.consumed <= MB + MULTIPART_OVERHEAD + MB + 64, f"{method} {path} read {reply.consumed} bytes"
+        declared = {"content-type": content_type, "content-length": str(32 * MB)}
+        reply = asgi_request(app, path, megabytes(32), headers=declared, method=method)
+        assert reply.status == 413 and reply.consumed == 0, f"{method} {path} read a declared over-cap body"
+    assert not (root / "set" / "a.pose.json").exists()
+
+
+def test_every_unsafe_route_cuts_off_a_stalled_body_and_frees_its_slot(tmp_path) -> None:
+    """A body that stops arriving gets 408 at ARGUS_PUPPET_BODY_TIMEOUT_S on every route, and no admission slot stays
+    held: a slow client cannot lock the service up."""
+    app, _ = _app(tmp_path, body_timeout_s=0.2, pose_concurrency=1)
+    state = app.state.puppet
+    for method, path, content_type in _bodies(app):
+        reply = asgi_request(app, path, [b'{"path": ', 30.0], headers={"content-type": content_type}, method=method)
+        assert reply.status == 408, f"{method} {path} ({content_type}) answered {reply.status}"
+        held = [a.in_flight for a in (state.admit, state.scan_admit, state.compute_admit)]
+        assert held == [0, 0, 0], f"{method} {path} left a slot held: {held}"
 
 
 def test_only_a_final_release_moves_latest() -> None:
