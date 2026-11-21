@@ -368,15 +368,21 @@ def test_without_age_check_no_estimator_is_built(monkeypatch, tmp_path) -> None:
 
 
 def test_threshold_defaults_match_the_library(tmp_path, monkeypatch) -> None:
+    import typer.main
+
     from argus_puppet import library
     from argus_puppet.compare import DEFAULT_CLOSE_THRESHOLD
 
-    for args, flag, default in (
-        (["compare", "--help"], "--threshold", DEFAULT_CLOSE_THRESHOLD),
-        (["library", "build", "--help"], "--dedupe-threshold", library.DEFAULT_DEDUPE_THRESHOLD),
+    root = typer.main.get_command(app)
+    for path, flag, default in (
+        (["compare"], "--threshold", DEFAULT_CLOSE_THRESHOLD),
+        (["library", "build"], "--dedupe-threshold", library.DEFAULT_DEDUPE_THRESHOLD),
     ):
-        text = " ".join(runner.invoke(app, args, env={"COLUMNS": "400"}).output.split())
-        assert flag in text and f"[{default}]" in text, (flag, text)
+        cmd = root
+        for name in path:
+            cmd = cmd.commands[name]  # type: ignore[attr-defined]
+        (param,) = [p for p in cmd.params if flag in p.opts]
+        assert param.default is None and param.help.endswith(f"[{default}]"), (flag, param.help)
 
     seen: dict = {}
     real = library.build_library
