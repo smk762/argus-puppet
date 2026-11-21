@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import dataclasses
 import re
 import subprocess
 from pathlib import Path
 
+from conftest import FakeEstimator, draw_image
+from fastapi.testclient import TestClient
+from starlette.routing import Route
+
 from argus_puppet import registry
+from argus_puppet.config import Settings
+from argus_puppet.server.app import create_app
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -67,3 +74,67 @@ def test_no_image_is_hidden_in_a_base64_literal() -> None:
             if head.startswith(IMAGE_MAGIC):
                 found.append(path)
     assert found == []
+
+
+# --- every state-changing route is guarded; a caller's path stays under the data root ---------------------------
+
+EVIL = {"origin": "https://evil.example", "sec-fetch-site": "cross-site"}
+UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _app(tmp_path: Path, **changes):
+    root = tmp_path / "data"
+    (root / "set").mkdir(parents=True, exist_ok=True)
+    (root / "set" / "a.png").write_bytes(draw_image())
+    settings = Settings(model_dir=tmp_path / "models", device="cpu", data_root=root, **changes)
+    return create_app(settings, estimator=FakeEstimator()), root
+
+
+def _unsafe_routes(app) -> list[tuple[str, str]]:
+    found = []
+    for route in app.routes:
+        if isinstance(route, Route):
+            found += [(m, route.path) for m in sorted((route.methods or set()) & UNSAFE)]
+    return found
+
+
+def test_every_unsafe_route_refuses_another_site(tmp_path) -> None:
+    """Every POST/PUT/PATCH/DELETE route: another site's page gets 403, whatever the route is (CORS is no write
+    boundary: a multipart POST needs no preflight)."""
+    app, root = _app(tmp_path)
+    routes = _unsafe_routes(app)
+    assert ("POST", "/pose") in routes and ("POST", "/pose/scan") in routes  # the table was walked
+    with TestClient(app) as client:
+        for method, path in routes:
+            reply = client.request(method, path, headers=EVIL, json={"path": "set"})
+            assert reply.status_code == 403, f"{method} {path} answered {reply.status_code}"
+    assert not (root / "set" / "a.pose.json").exists()
+
+
+def test_read_only_mode_refuses_every_unsafe_route(tmp_path) -> None:
+    app, root = _app(tmp_path, read_only=True)
+    routes = _unsafe_routes(app)
+    assert routes
+    with TestClient(app) as client:
+        for method, path in routes:
+            reply = client.request(method, path, json={"path": "set"})
+            assert reply.status_code == 403, f"{method} {path} answered {reply.status_code} in read-only mode"
+            assert "read-only" in reply.json()["detail"]
+        assert client.get("/health").status_code == 200  # reads still work
+    assert not (root / "set" / "a.pose.json").exists()
+
+
+def test_a_scan_path_escaping_the_data_root_is_refused(tmp_path) -> None:
+    app, root = _app(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "b.png").write_bytes(draw_image())
+    (root / "escape").symlink_to(outside)
+    with TestClient(app) as client:
+        for path in ("../outside", str(outside), "set/../../outside", "escape"):
+            reply = client.post("/pose/scan", json={"path": path})
+            assert reply.status_code == 400, f"{path!r} answered {reply.status_code}"
+    assert not (outside / "b.pose.json").exists()
+    unrooted = create_app(dataclasses.replace(app.state.puppet.settings, data_root=None), estimator=FakeEstimator())
+    with TestClient(unrooted) as client:
+        assert client.post("/pose/scan", json={"path": "set"}).status_code == 409
