@@ -108,7 +108,7 @@ class CudaUnavailable(ModelUnavailable):
 
     def __init__(self, reason: str) -> None:
         super().__init__(
-            f"CUDA was asked for (device 'cuda') but cannot be used: {reason}.",
+            f"CUDA was asked for (device 'cuda') but cannot be used: {reason}{'' if reason.endswith(('.', '?')) else '.'}",
             "Run with a GPU (docker: --gpus all), or set ARGUS_PUPPET_DEVICE=auto (or cpu) to run on the CPU.",
         )
         self.reason = reason
