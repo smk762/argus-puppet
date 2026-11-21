@@ -161,7 +161,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}},value=${{ needs.release-tag.outputs.tag }}
             type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-tag.outputs.tag }}
-            type=raw,value=latest
+            # LOCAL EDIT (as argus-forge): only a final release moves `latest`/`latest-gpu`; a `v0.2.0-rc1` tag must not.
+            type=raw,value=latest,enable=${{ !contains(needs.release-tag.outputs.tag, '-') }}
       # The package version, from the tag: meta's version carries the "-gpu" suffix.
       - id: ver
         env:

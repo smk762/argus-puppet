@@ -151,3 +151,12 @@ def test_a_scan_path_escaping_the_data_root_is_refused(tmp_path) -> None:
     unrooted = create_app(dataclasses.replace(app.state.puppet.settings, data_root=None), estimator=FakeEstimator())
     with TestClient(unrooted) as client:
         assert client.post("/pose/scan", json={"path": "set"}).status_code == 409
+
+
+def test_only_a_final_release_moves_latest() -> None:
+    """The release workflow runs on every ``v*`` tag: a pre-release (``v0.2.0-rc1``) must not repoint ``latest``."""
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    lines = [ln.strip() for ln in workflow.splitlines() if "value=latest" in ln and not ln.strip().startswith("#")]
+    assert lines, "the release workflow no longer tags latest: update this test"
+    for line in lines:
+        assert "enable=${{ !contains(needs.release-tag.outputs.tag, '-') }}" in line, line
