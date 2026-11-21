@@ -79,6 +79,21 @@ HIP_WIDTH_TO_TORSO = 1.5
 # A torso scale under this many pixels is noise, not a person.
 MIN_SCALE_PX = 4.0
 
+# ── anchoring when one hip or one shoulder is not confident ──────────────────────────────────────────────────────
+
+# An anchor joint (hip or shoulder) below min_joint_score still places the centre and the scale when its score is at
+# least this: the estimator still put it somewhere sensible, and dropping it would move the centre by half a hip
+# width the moment its score dips under the threshold (0.23 torso units in a frontal view). It stays masked as a
+# compared joint. Below this floor its coordinate is treated as unplaced.
+ANCHOR_MIN_SCORE = 0.1
+# With the anchor joint gone altogether, it is estimated from the other pair: hip width ~ 0.7 x shoulder width. Adult
+# hip keypoints sit 0.45-0.55 torso lengths apart and shoulder keypoints ~0.7 (a ratio of 0.64-0.79); the error of
+# the estimate moves the centre by half the error in the width, a few hundredths of a torso unit.
+HIP_TO_SHOULDER_WIDTH = 0.7
+# Coordinates further than this from the origin (pixels) are treated as unplaced, as the renderer does: it keeps the
+# float32 distance kernel in range.
+MAX_COORD = 1e6
+
 
 @dataclass(frozen=True)
 class TorsoFrame:
@@ -109,45 +124,78 @@ def _check(keypoints: np.ndarray) -> np.ndarray:
     return kp
 
 
+def _placed(kp: np.ndarray) -> np.ndarray:
+    """Finite coordinates within :data:`MAX_COORD` of the origin."""
+    xy = kp[:, :2]
+    return np.isfinite(xy).all(axis=1) & (np.abs(np.nan_to_num(xy, nan=np.inf)) < MAX_COORD).all(axis=1)
+
+
 def confident(keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOINT_SCORE) -> np.ndarray:
-    """Boolean ``(133,)``: score at or above *min_joint_score* and finite coordinates."""
+    """Boolean ``(133,)``: score at or above *min_joint_score* and finite coordinates within :data:`MAX_COORD`."""
     kp = _check(keypoints)
-    return (kp[:, 2] >= min_joint_score) & np.isfinite(kp[:, :2]).all(axis=1)
+    return (kp[:, 2] >= min_joint_score) & _placed(kp)
 
 
-def _midpoint(kp: np.ndarray, ok: np.ndarray, a: int, b: int) -> np.ndarray | None:
-    if ok[a] and ok[b]:
-        return (kp[a, :2] + kp[b, :2]) / 2.0
-    if ok[a]:
-        return kp[a, :2].copy()
-    if ok[b]:
-        return kp[b, :2].copy()
-    return None
+def _anchor_points(kp: np.ndarray, min_joint_score: float) -> dict[int, np.ndarray] | None:
+    """The four anchor joints (hips, shoulders) as the torso frame uses them, or ``None`` when it cannot be placed.
+
+    A joint is taken as it is when it is confident, or when its score is at least :data:`ANCHOR_MIN_SCORE` (a
+    doubtful joint still marks where the body is). A joint missing below that is estimated from the other pair when
+    that pair is whole (the missing hip is the present hip plus 0.7 x the shoulder vector on that side, the missing
+    shoulder the present shoulder plus the hip vector / 0.7). Otherwise it is left out, and the one present joint of
+    the pair stands in for its midpoint: right in profile, where the pair nearly coincides.
+    """
+    floor = min(min_joint_score, ANCHOR_MIN_SCORE)
+    usable = (kp[:, 2] >= floor) & _placed(kp)
+    pts = {j: kp[j, :2].copy() for j in (L_HIP, R_HIP, L_SHOULDER, R_SHOULDER) if usable[j]}
+    pairs = ((L_HIP, R_HIP, L_SHOULDER, R_SHOULDER, HIP_TO_SHOULDER_WIDTH),)
+    pairs += ((L_SHOULDER, R_SHOULDER, L_HIP, R_HIP, 1.0 / HIP_TO_SHOULDER_WIDTH),)
+    estimates: dict[int, np.ndarray] = {}
+    for a, b, oa, ob, ratio in pairs:
+        if oa in pts and ob in pts:
+            if a in pts and b not in pts:
+                estimates[b] = pts[a] + ratio * (pts[ob] - pts[oa])
+            elif b in pts and a not in pts:
+                estimates[a] = pts[b] + ratio * (pts[oa] - pts[ob])
+    pts.update(estimates)
+    if not ({L_HIP, R_HIP} & pts.keys()) or not ({L_SHOULDER, R_SHOULDER} & pts.keys()):
+        return None
+    return pts
+
+
+def _mid(pts: dict[int, np.ndarray], a: int, b: int) -> np.ndarray:
+    if a in pts and b in pts:
+        return (pts[a] + pts[b]) / 2.0
+    return (pts[a] if a in pts else pts[b]).copy()
 
 
 def torso_frame(keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOINT_SCORE) -> TorsoFrame | None:
     """The anchor and robust scale of one person's ``(133, 3)`` keypoints, or ``None`` when it cannot be placed.
 
-    The centre is the midpoint of the hips, or the one confident hip (in profile the hips nearly coincide, so one is
-    a good centre; in a frontal view both are normally visible). The mid-shoulder likewise. The scale is::
+    The centre is the midpoint of the hips and the mid-shoulder the midpoint of the shoulders, read from the anchor
+    joints of :func:`_anchor_points`: a hip or shoulder scoring under *min_joint_score* still anchors when it scores
+    :data:`ANCHOR_MIN_SCORE` or more, and one missing altogether is estimated from the other pair when that pair is
+    whole. So a single anchor joint dipping under the threshold moves the vector by a few hundredths of a torso unit
+    rather than half a hip width. With one hip (or shoulder) and no way to estimate the other, that one joint is the
+    midpoint: right in profile, where the pair nearly coincides. The scale is::
 
         max(|mid_shoulder - mid_hip|, 1.2 * shoulder_width, 1.5 * hip_width)
 
-    with a width only counted when both of its joints are confident. ``None`` without at least one confident hip and
-    one confident shoulder, or when the scale is under :data:`MIN_SCALE_PX`.
+    with a width counted when both of its anchor joints are known. ``None`` without a hip and a shoulder to anchor
+    on, or when the scale is under :data:`MIN_SCALE_PX`.
     """
     kp = _check(keypoints)
-    ok = confident(kp, min_joint_score)
-    mid_hip = _midpoint(kp, ok, L_HIP, R_HIP)
-    mid_shoulder = _midpoint(kp, ok, L_SHOULDER, R_SHOULDER)
-    if mid_hip is None or mid_shoulder is None:
+    pts = _anchor_points(kp, min_joint_score)
+    if pts is None:
         return None
+    mid_hip = _mid(pts, L_HIP, R_HIP)
+    mid_shoulder = _mid(pts, L_SHOULDER, R_SHOULDER)
     torso = float(np.hypot(*(mid_shoulder - mid_hip)))
     candidates = [torso]
-    if ok[L_SHOULDER] and ok[R_SHOULDER]:
-        candidates.append(SHOULDER_WIDTH_TO_TORSO * float(np.hypot(*(kp[L_SHOULDER, :2] - kp[R_SHOULDER, :2]))))
-    if ok[L_HIP] and ok[R_HIP]:
-        candidates.append(HIP_WIDTH_TO_TORSO * float(np.hypot(*(kp[L_HIP, :2] - kp[R_HIP, :2]))))
+    if L_SHOULDER in pts and R_SHOULDER in pts:
+        candidates.append(SHOULDER_WIDTH_TO_TORSO * float(np.hypot(*(pts[L_SHOULDER] - pts[R_SHOULDER]))))
+    if L_HIP in pts and R_HIP in pts:
+        candidates.append(HIP_WIDTH_TO_TORSO * float(np.hypot(*(pts[L_HIP] - pts[R_HIP]))))
     scale = max(candidates)
     if not np.isfinite(scale) or scale < MIN_SCALE_PX:
         return None
@@ -183,7 +231,7 @@ def embed(
 ) -> PoseVector | None:
     """The pose vector of one person's ``(133, 3)`` keypoints, or ``None`` when it is unusable.
 
-    Unusable means: no confident hip or no confident shoulder (there is no anchor), a scale under
+    Unusable means: no hip or no shoulder to anchor on (see :func:`torso_frame`), a scale under
     :data:`MIN_SCALE_PX`, or fewer than *min_usable_joints* confident body joints.
     """
     kp = _check(keypoints)

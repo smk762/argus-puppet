@@ -8,7 +8,8 @@ is built on this one distance, so this page states it exactly.
 
 One person's 133 COCO-WholeBody keypoints `(x, y, score)` in image pixels, y pointing down (see the wire contract in
 `models.py`). A joint is **confident** when its score is at least `min_joint_score` (default 0.3) and its
-coordinates are finite.
+coordinates are finite and within 10^6 px of the origin (a coordinate further out is treated as unplaced, as the
+renderer does; it would overflow the float32 distance kernel).
 
 ## Which joints
 
@@ -25,16 +26,34 @@ ankles.
 
 Let `p_j` be the pixel position of joint `j`.
 
-- **Centre:** the mid-hip `h = (p_lhip + p_rhip) / 2`. If only one hip is confident, that hip is the centre: in
-  profile the hips nearly coincide, and in a frontal view both are normally visible.
-- **Mid-shoulder:** `s`, the same rule for the shoulders.
+- **Centre:** the mid-hip `h = (p_lhip + p_rhip) / 2`.
+- **Mid-shoulder:** `s = (p_lsh + p_rsh) / 2`.
+
+The four **anchor joints** (hips and shoulders) that place the centre and the scale are read more leniently than
+the compared joints, because dropping one moves everything else. A frontal pose whose one hip dips from 0.30 to
+0.29 would otherwise have its centre jump to the other hip, half a hip width, which moves the whole vector by 0.23
+torso units; an anchor shoulder setting the scale of a foreshortened torso moved it by 0.18. So, per anchor joint:
+
+1. confident: used as it is;
+2. below `min_joint_score` but scoring at least 0.1 (`ANCHOR_MIN_SCORE`): its coordinate is still used for the
+   centre and scale (the estimator still placed it), while the joint stays **masked** as a compared joint;
+3. missing altogether (score under 0.1, or unplaced) while the other pair is whole: estimated from it. A missing hip
+   is the present hip plus 0.7 times the shoulder vector on that side (`HIP_TO_SHOULDER_WIDTH`: adult hip keypoints
+   sit 0.45-0.55 torso lengths apart, shoulder keypoints about 0.7), a missing shoulder the present shoulder plus
+   the hip vector divided by 0.7;
+4. otherwise (one hip and one shoulder, nothing to estimate from): the one present joint of the pair stands in for
+   the midpoint. That is right in profile, where the pair nearly coincides, and that is where it happens.
+
+On the synthetic figures one anchor joint crossing the threshold now moves the vector by 0 (rule 2) and by at most
+0.015 when it vanishes (rule 3; 95th percentile 0.05 with 10 degree limb jitter and 0.02 joint noise). The rules are
+linear in the coordinates and left/right symmetric, so translation, scale and mirror invariance are exact.
 - **Scale:** a robust torso length
 
   ```
   S = max(|s - h|, 1.2 * |p_lsh - p_rsh|, 1.5 * |p_lhip - p_rhip|)
   ```
 
-  with each width counted only when both of its joints are confident. The torso foreshortens when the subject leans
+  with each width counted when both of its anchor joints are known (rules 1-3 above). The torso foreshortens when the subject leans
   or lies toward the camera; the shoulder and hip widths do not, but they shrink in profile, where the torso does
   not. Adult shoulder keypoints sit about 0.7 torso lengths apart and hip keypoints about 0.45-0.55, so the
   multipliers keep both widths below the true torso length in an upright frontal pose (the torso itself is then the
@@ -56,7 +75,7 @@ not count as a wrist at the hip.
 
 `embed()` returns `None` (the image is not usable) when:
 
-- no hip or no shoulder is confident (there is no anchor to centre or scale on);
+- no hip or no shoulder can anchor it (none scoring 0.1 or more; there is nothing to centre or scale on);
 - the scale `S` is under 4 pixels (noise, not a person);
 - fewer than `min_usable_joints` (default 8) body joints are confident. Eight admits an upper-body shot with the
   hips in frame (head 5 + shoulders 2 + hips 2 = 9 before any limb) and refuses a head-and-shoulders portrait.

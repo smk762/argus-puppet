@@ -111,10 +111,66 @@ def test_mirror_is_an_involution_and_swaps_sides() -> None:
 
 
 def test_embedding_a_flipped_image_is_the_mirror_vector() -> None:
-    kp = make("wave")
-    a = mirror_vector(embed(kp))
-    b = embed(flip_horizontal(kp, 1000))
-    assert np.allclose(a.coords, b.coords) and np.array_equal(a.mask, b.mask)
+    for drop in ((), (Joint.RIGHT_HIP,), (Joint.LEFT_SHOULDER,)):  # also with an estimated anchor joint
+        kp = make("wave", dropout=drop)
+        a = mirror_vector(embed(kp))
+        b = embed(flip_horizontal(kp, 1000))
+        assert np.allclose(a.coords, b.coords) and np.array_equal(a.mask, b.mask)
+        assert pose_distance(b, mirror_vector(b)) == 0.0
+        assert pose_distance(embed(kp), b) == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.parametrize("name", ["standing", "t_pose", "back", "profile", "seated", "lying", "star_jump"])
+@pytest.mark.parametrize("joint", [Joint.LEFT_HIP, Joint.RIGHT_HIP, Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER])
+@pytest.mark.parametrize("score", [0.29, 0.05, 0.0])
+def test_one_anchor_joint_crossing_the_threshold_barely_moves_the_vector(name: str, joint: int, score: float) -> None:
+    # Regression: falling back to the one confident hip moved a frontal pose's centre by half a hip width (0.23).
+    kp = make(name)
+    dipped = kp.copy()
+    dipped[joint, 2] = score
+    v = embed(dipped)
+    assert v is not None and not v.mask[joint]  # still masked as a compared joint
+    assert pose_distance(embed(kp), v) <= 0.03
+
+
+def test_one_anchor_joint_crossing_the_threshold_with_jitter_stays_small() -> None:
+    rng = np.random.default_rng(12)
+    names = ["standing", "t_pose", "back", "profile", "seated", "crouch", "star_jump", "hands_on_hips"]
+    ds = []
+    for k in range(200):
+        kp = make(names[k % len(names)], rng=rng, angle_jitter=10, joint_noise=0.02)
+        for joint in (Joint.LEFT_HIP, Joint.RIGHT_HIP, Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER):
+            dipped = kp.copy()
+            dipped[joint, 2] = 0.0
+            ds.append(pose_distance(embed(kp), embed(dipped)))
+    assert np.percentile(ds, 95) <= 0.06 and max(ds) <= 0.1
+
+
+def test_a_shoulder_dipping_keeps_the_scale_of_a_foreshortened_torso() -> None:
+    kp = make("standing", scale=100.0)
+    kp[:11, 1] = kp[Joint.LEFT_HIP, 1] + (kp[:11, 1] - kp[Joint.LEFT_HIP, 1]) * 0.3  # torso toward the camera
+    for score in (0.29, 0.0):
+        dipped = kp.copy()
+        dipped[Joint.RIGHT_SHOULDER, 2] = score
+        assert pose_distance(embed(kp), embed(dipped)) <= 0.06  # was 0.18: the shoulder width set the scale
+
+
+def test_one_hip_and_one_shoulder_without_an_estimate_anchor_on_the_joints_themselves() -> None:
+    kp = make("profile", dropout=(Joint.RIGHT_HIP, Joint.RIGHT_SHOULDER))
+    frame = torso_frame(kp)
+    assert np.allclose(frame.mid_hip, kp[Joint.LEFT_HIP, :2]) and np.allclose(
+        frame.mid_shoulder, kp[Joint.LEFT_SHOULDER, :2]
+    )
+
+
+def test_huge_finite_coordinates_are_unplaced() -> None:
+    base = make("wave")
+    for value in (1e40, 1e300, 2e6):
+        kp = base.copy()
+        kp[Joint.LEFT_EAR, :2] = value
+        v = embed(kp)
+        assert not v.mask[Joint.LEFT_EAR]
+        assert pose_distance(v, embed(base)) == pytest.approx(0.0, abs=1e-6)  # was inf (float32 overflow)
 
 
 # ── distance ─────────────────────────────────────────────────────────────────────────────────────────────────────
