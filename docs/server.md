@@ -21,8 +21,8 @@ descriptions are authoritative and are rendered to `schema/puppet-wire.schema.js
 | `POST /render` | `RenderRequest` (JSON) | `image/png` | nothing |
 
 Errors are FastAPI's `{"detail": ...}`: a string, or for validation errors (422) a list of
-`{type, loc, msg}` entries. Puppet's own JSON routes (`/stats`, `/compare`, `/render`) never echo the input back in
-a 422.
+`{type, loc, msg}` entries. Puppet's JSON routes (`/pose/scan`, `/stats`, `/compare`, `/render`) never echo the
+input back in a 422.
 
 ### `GET /health`
 
@@ -126,7 +126,9 @@ A failed image never stops the run. A missing model or a refused GPU lease does 
 | 200 | The run finished, including runs where some images failed or none were found |
 | 400 | `path` falls outside the data root |
 | 404 | `path` does not exist under the data root |
-| 409 | No data root is configured: the route is off |
+| 409 | No data root is configured: the route is off (answered before the body is read) |
+| 413 | The body is larger than 16 KiB: a `ScanRequest` is a path and two flags |
+| 415 | `Content-Type` is present and is not `application/json` |
 | 422 | The body is not a valid `ScanRequest` |
 | 503 | Another scan is running (one at a time), or a model or GPU lease problem as for `/pose` |
 

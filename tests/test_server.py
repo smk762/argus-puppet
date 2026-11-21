@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from argus_puppet import registry, runtime
 from argus_puppet.config import Settings
 from argus_puppet.models import Health, PoseResult
-from argus_puppet.server.app import create_app, parse_face_hint
+from argus_puppet.server.app import SCAN_JSON_BYTES, create_app, parse_face_hint
 
 
 @pytest.fixture
@@ -227,6 +227,30 @@ def test_scan_refuses_paths_outside_the_root(settings, fake, data_root, path) ->
 
 def test_scan_of_a_missing_folder_is_404(settings, fake, data_root) -> None:
     assert _scan_client(settings, data_root, fake).post("/pose/scan", json={"path": "nope"}).status_code == 404
+
+
+def test_the_scan_body_is_capped_checked_and_never_echoed(settings, fake, data_root) -> None:
+    """/pose/scan reads its body like the other JSON routes: a small cap (counted as it streams), JSON only, and
+    422 without the input."""
+    app = create_app(dataclasses.replace(settings, data_root=data_root), estimator=fake)
+    json_type = {"content-type": "application/json"}
+    reply = asgi_request(app, "/pose/scan", megabytes(32, b'{"path": "set", "pad": "', b'"}'), headers=json_type)
+    assert reply.status == 413, reply.body
+    assert reply.consumed <= MB + 64, f"the server read {reply.consumed // MB} MB of a scan request"
+    client = TestClient(app)
+    padded = b'{"path": "set", "pad": "' + b"a" * (SCAN_JSON_BYTES + 1) + b'"}'
+    assert client.post("/pose/scan", content=padded, headers=json_type).status_code == 413
+    assert client.post("/pose/scan", content=b"path=set", headers={"content-type": "text/plain"}).status_code == 415
+    reply = client.post("/pose/scan", json={"path": ["SECRET-INPUT"]})
+    assert reply.status_code == 422 and "SECRET-INPUT" not in reply.text
+    assert client.post("/pose/scan", content=b"[" * 8000 + b"]" * 8000, headers=json_type).status_code == 422
+    assert fake.calls == 0
+
+
+def test_a_scan_without_a_data_root_is_refused_before_its_body_is_read(settings, fake) -> None:
+    app = create_app(settings, estimator=fake)  # no data root
+    reply = asgi_request(app, "/pose/scan", [b'{"path": "set"}'], headers={"content-type": "application/json"})
+    assert reply.status == 409 and reply.consumed == 0
 
 
 def test_scan_with_a_missing_model_is_503(settings, data_root) -> None:

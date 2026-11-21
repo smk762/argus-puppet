@@ -72,6 +72,8 @@ READ_ONLY_REFUSAL = "argus-puppet is read-only (ARGUS_PUPPET_READ_ONLY): state-c
 # the cap, and read_upload then holds the file itself to the exact cap.
 MULTIPART_OVERHEAD = 64 * 1024
 RAW_TYPES = ("application/octet-stream", "image/")
+# A ScanRequest is a path and two flags: anything past this is not one.
+SCAN_JSON_BYTES = 16 * 1024
 BUSY_RETRY_S = 1
 GPU_RETRY_S = 5
 
@@ -389,11 +391,13 @@ def create_app(
                 raise model_errors(exc) from None
 
     @app.post("/pose/scan", response_model=ScanSummary)
-    async def post_scan(req: ScanRequest) -> ScanSummary:
-        """Pose a folder under the data root into ``<stem>.pose.json`` sidecars (the one state-changing route)."""
+    async def post_scan(request: Request) -> ScanSummary:
+        """Pose a folder under the data root into ``<stem>.pose.json`` sidecars (the one state-changing route):
+        ``ScanRequest``."""
         root = settings.data_root
-        if root is None:
+        if root is None:  # before the body is read
             raise HTTPException(409, "no data root is configured (ARGUS_PUPPET_DATA_ROOT): scanning is off")
+        req = await read_json(request, ScanRequest, SCAN_JSON_BYTES)
         try:
             target = safe_join(root, req.path, allow_root=True, label="path")
         except PathRefused as exc:
