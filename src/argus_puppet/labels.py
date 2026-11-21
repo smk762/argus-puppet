@@ -12,8 +12,8 @@ What one 2D frame can decide is limited, and the rules say ``unknown`` rather th
   the hips with the feet hanging below them) and a *star* (upright torso, both legs straight and splayed to opposite
   sides, both arms raised or out). A person striking a star pose on the ground reads as jumping; a jump with ordinary
   running legs reads as standing or unknown.
-* **Standing needs a whole leg** (hip, knee and ankle) with a visible shin: a straight vertical thigh without its ankle, or with a short shin, could be kneeling
-  upright, so it is unknown.
+* **Standing needs a whole leg** (hip, knee and ankle) with a visible shin: a straight vertical thigh without its
+  ankle, or with a short shin, could be kneeling upright, so it is unknown.
 
 The thresholds are named constants below, each with the reasoning behind it; ``docs/metrics.md`` tabulates them.
 """

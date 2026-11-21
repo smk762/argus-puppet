@@ -362,7 +362,8 @@ From smk762/argus-proof#122:
 
 ## Cost
 
-On a desktop CPU with synthetic poses, `pose_set_stats` takes about 0.4 s for 1000 images and 3.5 s for 5000 (of
-which embedding and labelling are about 1.3 s, the distance matrix 1.4 s, clustering 0.4 s). Peak memory at 5000 is
-about two N x N float32 matrices (100 MB each). `compare_pose_sets` on 2500 outputs against 2500 references takes
-about 2 s.
+On a desktop CPU with synthetic poses, `pose_set_stats` takes about 0.4 s for 1000 images and 3.9 s for 5000 (of
+which embedding and labelling are about 1.3 s, the distance matrix 1.4 s, clustering 0.4 s), with a peak of about
+230 MB above the input at 5000 (two N x N float32 matrices). `compare_pose_sets` on 2500 outputs against 2500
+references takes about 3.2 s and about 15 MB of working memory: it streams the nearest-neighbour search in row chunks
+and never holds the M x N matrix, and about a third of the time is the reference set's leave-one-out baseline.
