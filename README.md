@@ -66,7 +66,8 @@ argus-puppet library sample poses.library.json -n 8 --render-dir batch --size 10
 ```
 
 Re-running `pose` skips images that already have a sidecar, so it is cheap to repeat. A set with fewer than two
-usable poses scores diversity 0; measure sets of tens of images or more. For a faster, lighter model pair on the
+usable poses scores diversity 0; measure sets of tens of images or more, and read `usable` and `comparable_share`
+before trusting the score (see [docs/metrics.md](docs/metrics.md#suggested-gate-for-proof)). For a faster, lighter model pair on the
 CPU, add `--pose-model dwpose-m-256x192 --detector yolox_nano` (see
 [docs/models.md](docs/models.md#choosing-models)).
 

@@ -138,6 +138,8 @@ def test_set_stats() -> None:
     stats = PoseSetStats(
         count=3,
         usable=2,
+        comparable_pairs=1,
+        comparable_share=1.0,
         diversity=0.4,
         mean_pairwise_distance=0.8,
         cluster_count=1,
@@ -157,6 +159,8 @@ def test_set_stats() -> None:
         stats.model_validate({**stats.model_dump(), "diversity": 1.5})
     with pytest.raises(ValidationError, match="usable"):
         stats.model_validate({**stats.model_dump(), "usable": 4})
+    with pytest.raises(ValidationError, match="comparable_pairs"):
+        stats.model_validate({**stats.model_dump(), "comparable_pairs": 2})
     with pytest.raises(ValidationError, match="cluster_count"):
         stats.model_validate({**stats.model_dump(), "cluster_count": 2})
     with pytest.raises(ValidationError):

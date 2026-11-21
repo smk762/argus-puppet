@@ -1146,6 +1146,19 @@
           "title": "Clusters",
           "type": "array"
         },
+        "comparable_pairs": {
+          "description": "Pairs of usable poses whose distance is defined (enough shared joints): the number of pairs diversity and mean_pairwise_distance average over.",
+          "minimum": 0,
+          "title": "Comparable Pairs",
+          "type": "integer"
+        },
+        "comparable_share": {
+          "description": "comparable_pairs / (usable * (usable - 1) / 2); 0 under 2 usable. A low share means diversity describes only a subset of the set.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Comparable Share",
+          "type": "number"
+        },
         "count": {
           "description": "Images in the set.",
           "minimum": 0,
@@ -1156,7 +1169,7 @@
           "$ref": "#/$defs/Coverage"
         },
         "diversity": {
-          "description": "How varied the usable poses are, 0 (all one pose) to 1 (highly varied); 0 under 2 usable.",
+          "description": "How varied the usable poses are, 0 (all one pose) to 1 (highly varied): the mean over the comparable pairs of 1 - exp(-(d / diversity_scale)^2); 0 under 2 usable or with no comparable pair. Trust it only with enough usable poses and a high comparable_share (docs/metrics.md).",
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Diversity",
@@ -1212,6 +1225,8 @@
       "required": [
         "count",
         "usable",
+        "comparable_pairs",
+        "comparable_share",
         "diversity",
         "mean_pairwise_distance",
         "cluster_count",

@@ -55,6 +55,7 @@ __all__ = [
     "EmbeddedSet",
     "average_linkage",
     "cluster_ids",
+    "comparable_pairs",
     "coverage",
     "diversity",
     "embed_set",
@@ -99,6 +100,12 @@ def diversity(dist: np.ndarray, scale: float = DIVERSITY_SCALE) -> float:
         total += float(pair_diversity(vals, scale).sum())
         count += len(vals)
     return min(1.0, max(0.0, total / count)) if count else 0.0
+
+
+def comparable_pairs(dist: np.ndarray) -> int:
+    """Pairs ``i < j`` of a square distance matrix whose distance is defined (finite): the denominator of
+    :func:`diversity` and :func:`mean_pairwise_distance`."""
+    return sum(int(np.isfinite(vals).sum()) for vals in _upper_rows(dist))
 
 
 def mean_pairwise_distance(dist: np.ndarray) -> float:
@@ -343,9 +350,13 @@ def pose_set_stats(results: Sequence[PoseResult], *, params: MetricParams | None
         )
         for i in range(len(es.images))
     ]
+    pairs = n_usable * (n_usable - 1) // 2
+    n_comparable = comparable_pairs(dist)
     return PoseSetStats(
         count=len(es.images),
         usable=n_usable,
+        comparable_pairs=n_comparable,
+        comparable_share=n_comparable / pairs if pairs else 0.0,
         diversity=diversity(dist, params.diversity_scale),
         mean_pairwise_distance=mean_pairwise_distance(dist),
         cluster_count=len(clusters),

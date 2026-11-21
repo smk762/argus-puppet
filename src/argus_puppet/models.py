@@ -298,8 +298,22 @@ class PoseSetStats(_Versioned):
 
     count: int = Field(..., ge=0, description="Images in the set.")
     usable: int = Field(..., ge=0, description="Images with a usable primary pose.")
+    comparable_pairs: int = Field(
+        ...,
+        ge=0,
+        description="Pairs of usable poses whose distance is defined (enough shared joints): the number of pairs "
+        "diversity and mean_pairwise_distance average over.",
+    )
+    comparable_share: Unit = Field(
+        ...,
+        description="comparable_pairs / (usable * (usable - 1) / 2); 0 under 2 usable. A low share means diversity "
+        "describes only a subset of the set.",
+    )
     diversity: Unit = Field(
-        ..., description="How varied the usable poses are, 0 (all one pose) to 1 (highly varied); 0 under 2 usable."
+        ...,
+        description="How varied the usable poses are, 0 (all one pose) to 1 (highly varied): the mean over the "
+        "comparable pairs of 1 - exp(-(d / diversity_scale)^2); 0 under 2 usable or with no comparable pair. Trust it "
+        "only with enough usable poses and a high comparable_share (docs/metrics.md).",
     )
     mean_pairwise_distance: float = Field(
         ..., ge=0.0, description="Mean pose distance over all usable pairs; 0 under 2 usable."
@@ -318,6 +332,8 @@ class PoseSetStats(_Versioned):
     def _counts_agree(self) -> PoseSetStats:
         if self.usable > self.count:
             raise ValueError(f"usable {self.usable} exceeds count {self.count}")
+        if self.comparable_pairs > self.usable * (self.usable - 1) // 2:
+            raise ValueError(f"comparable_pairs {self.comparable_pairs} exceeds the {self.usable} usable poses' pairs")
         if self.cluster_count != len(self.clusters):
             raise ValueError(f"cluster_count {self.cluster_count} != {len(self.clusters)} clusters")
         return self

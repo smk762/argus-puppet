@@ -277,6 +277,7 @@ def _print_stats(folder: Path, s: PoseSetStats, out: Path | None) -> None:
     summary = Table(show_header=False)
     summary.add_row("images", str(s.count))
     summary.add_row("usable poses", str(s.usable))
+    summary.add_row("comparable pairs", f"{s.comparable_pairs} ({s.comparable_share:.0%} of usable pairs)")
     summary.add_row("diversity", f"{s.diversity:.3f}")
     summary.add_row("mean pairwise distance", f"{s.mean_pairwise_distance:.3f}")
     summary.add_row("clusters", str(s.cluster_count))

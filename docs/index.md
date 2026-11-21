@@ -48,8 +48,9 @@ descriptions there are authoritative.
 
 **argus-proof: the pose-diversity gate and memorisation evidence.** Pose the outputs (and the training set, for
 comparison) with `POST /pose/scan` or `argus-puppet pose`, then read `diversity` from `POST /stats` or
-`pose_set_stats`. [metrics.md](metrics.md#how-argus-proof-should-use-this) gives the suggested gate
-(`--min-pose-diversity 0.3`, reject code `pose_collapse`), what to report beside it, and how to read
+`pose_set_stats`. [metrics.md](metrics.md#how-argus-proof-should-use-this) gives the suggested gate (enough usable
+and comparable poses first, then reject `pose_collapse` when `diversity < 0.3` or `largest_cluster_share >= 0.75`),
+what to report beside it, and how to read
 `POST /compare`. A pose match to a training frame is evidence, not proof, of memorisation: use it beside the
 identity and image-similarity checks.
 

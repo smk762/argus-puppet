@@ -39,6 +39,8 @@ left out of every number.
 | field | definition |
 |---|---|
 | `count`, `usable` | images, and images with a usable primary pose |
+| `comparable_pairs` | pairs of usable poses whose distance is defined (enough shared joints): the denominator of `diversity` and `mean_pairwise_distance` |
+| `comparable_share` | `comparable_pairs / (usable (usable - 1) / 2)`; 0 under two usable. Low when many poses are partial (waist-up crops against full-body shots) |
 | `mean_pairwise_distance` | mean `d` over all comparable usable pairs; 0 under two |
 | `diversity` | see below |
 | `clusters` | average-linkage clusters, largest first: `id`, `size`, `share = size / usable`, `medoid` |
@@ -86,11 +88,12 @@ Why this form:
 - **Monotone in spread:** spreading the poses further apart raises every `g(d_ij)`.
 - **Saturating:** each pair contributes at most 1, so the score is in [0, 1). A set of K equally common, mutually
   distinct poses scores about `1 - 1/K`.
-- **Not dominated by one outlier:** a single odd pose among N touches only `N - 1` of the `N(N-1)/2` pairs and adds
-  at most `2/N` (one lying pose added to 40 standing ones adds 0.05). A raw mean distance would let one far pose
-  pull the whole set up.
+- **Not dominated by one outlier:** one pose added to N touches N of the `N(N+1)/2` pairs, so it raises the score
+  by at most `2 (1 - diversity) / (N + 1)` (one lying pose added to 40 standing ones adds 0.046, against a bound of
+  0.047). The mean distance of the same set rises by 2.5 times: a raw mean lets one far pose pull the whole set up.
 - **Stable as N grows:** it is a U-statistic, an unbiased estimate of `E[g(d)]` for two random draws from the
-  underlying distribution, so it does not drift with set size (see the table: N = 50 and N = 500 agree within 0.01).
+  underlying distribution, so it does not drift with set size: the mean over 40 sets of 6 broad-mix poses is within
+  0.01 of one 400-pose set, where counting each pose against itself (a V-statistic) would give 5/6 of it.
 - **A flat start:** the squared exponent gives `g` zero slope at `d = 0`, so estimator jitter on a repeated pose
   costs almost nothing, while a real change of pose counts in full.
 
@@ -102,41 +105,73 @@ equally common distinct poses).
 
 Synthetic stick figures (`tests/posegen.py`) at random scale, position and mirroring, with every limb angle jittered
 uniformly by the given amount and every joint moved by Gaussian noise of the given standard deviation in torso
-units. Default parameters.
+units. "Body proportions" varies each person's upper arm, forearm, thigh and shin by up to 8 %; "one hip lost" sets
+one hip's score to 0 in half the frames (a waist-up crop losing a hip at the frame edge). Default parameters; every
+set's comparable share is 1.00.
 
 | set | N | diversity | mean distance | clusters | largest share |
 |---|---|---|---|---|---|
-| one jump shot, tight (3 deg, 0.02) | 50 | 0.031 | 0.051 | 1 | 1.00 |
-| one jump shot, tight (3 deg, 0.02) | 500 | 0.030 | 0.050 | 1 | 1.00 |
-| one jump shot (5 deg, 0.03) | 50 | 0.070 | 0.078 | 1 | 1.00 |
-| one jump shot (5 deg, 0.03) | 500 | 0.068 | 0.077 | 1 | 1.00 |
-| one tuck jump (5 deg, 0.03) | 50 | 0.052 | 0.068 | 1 | 1.00 |
-| one tuck jump (5 deg, 0.03) | 500 | 0.051 | 0.067 | 1 | 1.00 |
-| one jump shot, loose (8 deg, 0.05) | 50 | 0.171 | 0.127 | 1 | 1.00 |
-| one jump shot, loose (8 deg, 0.05) | 500 | 0.168 | 0.127 | 1 | 1.00 |
-| 90% one jump shot, rest broad mix | 200 | 0.198 | 0.174 | 11 | 0.92 |
-| 80% one jump shot, rest broad mix | 200 | 0.379 | 0.351 | 15 | 0.80 |
-| 70% one jump shot, rest broad mix | 200 | 0.485 | 0.383 | 15 | 0.71 |
-| two poses, 50/50 | 50 | 0.526 | 0.331 | 2 | 0.56 |
-| two poses, 50/50 | 500 | 0.515 | 0.324 | 2 | 0.55 |
-| standing, five arm positions | 50 | 0.573 | 0.288 | 4 | 0.32 |
-| standing, five arm positions | 500 | 0.564 | 0.287 | 4 | 0.37 |
-| 50% one jump shot, rest broad mix | 200 | 0.681 | 0.550 | 15 | 0.53 |
-| broad mix, 16 presets (10 deg, 0.03) | 50 | 0.879 | 0.675 | 15 | 0.18 |
-| broad mix, 16 presets (10 deg, 0.03) | 500 | 0.883 | 0.732 | 15 | 0.12 |
+| one jump shot, tight (3 deg, 0.02) | 50 | 0.032 | 0.052 | 1 | 1.00 |
+| one jump shot, tight (3 deg, 0.02) | 500 | 0.032 | 0.052 | 1 | 1.00 |
+| one jump shot (5 deg, 0.03) | 50 | 0.072 | 0.079 | 1 | 1.00 |
+| one jump shot (5 deg, 0.03) | 500 | 0.069 | 0.078 | 1 | 1.00 |
+| one tuck jump (5 deg, 0.03) | 50 | 0.051 | 0.068 | 1 | 1.00 |
+| one tuck jump (5 deg, 0.03) | 500 | 0.053 | 0.068 | 1 | 1.00 |
+| one jump shot, loose (8 deg, 0.05) | 50 | 0.160 | 0.123 | 1 | 1.00 |
+| one jump shot, loose (8 deg, 0.05) | 500 | 0.175 | 0.129 | 1 | 1.00 |
+| one jump shot, loose, body proportions | 200 | 0.185 | 0.133 | 1 | 1.00 |
+| one standing pose, loose, body proportions | 200 | 0.166 | 0.126 | 1 | 1.00 |
+| one jump shot, loose, one hip lost | 200 | 0.190 | 0.135 | 1 | 1.00 |
+| one jump shot, loose, body proportions and one hip lost | 200 | 0.200 | 0.139 | 1 | 1.00 |
+| 90% one jump shot, rest broad mix | 200 | 0.223 | 0.196 | 10 | 0.91 |
+| 85% one jump shot, rest broad mix | 200 | 0.299 | 0.259 | 14 | 0.85 |
+| 80% one jump shot, rest broad mix | 200 | 0.378 | 0.352 | 15 | 0.80 |
+| 70% one jump shot, rest broad mix | 200 | 0.486 | 0.408 | 15 | 0.71 |
+| two poses, 50/50 (standing / T-pose) | 200 | 0.398 | 0.211 | 2 | 0.58 |
+| one standing pose, half frontal, half profile | 200 | 0.401 | 0.208 | 2 | 0.50 |
+| two poses, 50/50 (jump shot / seated) | 50 | 0.544 | 0.520 | 2 | 0.54 |
+| two poses, 50/50 (jump shot / seated) | 500 | 0.533 | 0.515 | 2 | 0.51 |
+| standing, five arm positions | 50 | 0.565 | 0.288 | 4 | 0.42 |
+| standing, five arm positions | 500 | 0.550 | 0.280 | 4 | 0.42 |
+| 50% one jump shot, rest broad mix | 200 | 0.701 | 0.586 | 15 | 0.52 |
+| broad mix, 16 presets (10 deg, 0.03) | 50 | 0.848 | 0.620 | 15 | 0.22 |
+| broad mix, 16 presets (10 deg, 0.03) | 500 | 0.879 | 0.705 | 15 | 0.11 |
 
-The scale 0.3 was chosen so that "the same jump shot with small jitter" lands at 0.05-0.15 and a broad mix of
-stances and arm positions at 0.7 or more, with room between them for a gate. With 200 poses, scales of 0.25 / 0.3 /
-0.35 give 0.10 / 0.07 / 0.05 for the jump shot, 0.25 / 0.18 / 0.14 for the loose jump shot, and 0.92 / 0.89 / 0.86
-for the broad mix: 0.25 pushes a single loose pose toward the gate, 0.35 compresses the low end. The synthetic figures share one body's proportions; real people vary, which
-adds a little distance to every pair, so expect real single-pose sets to score somewhat higher than the table.
+Before the anchor fix of [pose-vector.md](pose-vector.md#normalisation), losing one hip in half the frames lifted a
+loose single pose from 0.18 to 0.35, over the gate; it now adds 0.01 to 0.04.
+
+The scale 0.3 was chosen so that "the same jump shot with small jitter" lands at 0.05-0.2 and a broad mix of stances
+and arm positions at 0.8 or more, with room between them for a gate. Scales of 0.25 / 0.3 / 0.35 give 0.094 / 0.066
+/ 0.049 for 80 jump shots, 0.23 / 0.17 / 0.13 for 200 loose jump shots, and 0.91 / 0.88 / 0.85 for 120 broad-mix
+poses: 0.25 pushes a single loose pose toward the gate, 0.35 compresses the low end. The non-squared `1 - exp(-d/s)`
+would score the tight jump shot 0.22, with a steep slope at `d = 0` that turns estimator jitter into diversity. The
+synthetic figures share one skeleton up to the 8 % proportion jitter; real people and real estimator noise add a
+little distance to every pair, so expect real single-pose sets to score somewhat higher than the table.
+
+**What counts as variety.** The vector lives in the image plane, so one stance shot frontal and in profile is two
+poses to it (0.40 for a half/half set, like two different arm positions). That is composition variety, which is what
+"not every output the same jump shot" asks about; it is not articulation variety, and a set that only varies the
+camera angle will pass a diversity gate.
 
 #### Suggested gate for proof
 
-**`--min-pose-diversity 0.3`, reject code `pose_collapse`.** On the calibration sets it rejects every single-pose
-set (up to 0.17) and a set that is about 85% one pose or more. It passes a 50/50 two-pose set (0.52) and anything
-broader. Proof should confirm the threshold on one real run, as it did for `--min-likeness`, and report
-`largest_cluster_share` and the medoid beside the score, so a rejection says *which* pose the outputs collapsed onto.
+Read the score only when it measures enough of the set, then gate on two numbers:
+
+1. **Measurable.** `usable >= 10`, `usable / count >= 0.5` and `comparable_share >= 0.8`. Otherwise the run is
+   "not measurable", never a pass: 98 unusable images and two different poses score 0.90, and four poses of which
+   one pair is comparable score whatever that one pair says.
+2. **Reject `pose_collapse`** when `diversity < 0.3` **or** `largest_cluster_share >= 0.75`.
+
+On the calibration sets every single-pose set, however loose (up to 0.20), fails both. Diversity alone rejects a
+set about 87 % one pose or more (90 %: 0.22; 85 %: 0.30, on the line); the cluster share rejects 75 % or more,
+because jitter, body proportions and lost joints inflate diversity but leave a collapsed set in one cluster (the 0.25
+cluster cut is twice the jitter distances above). It passes a 70/30 set (0.49, 0.71), both 50/50 two-pose sets (0.40
+and 0.53, largest 0.58) and anything broader. The gap between the loosest collapsed set (0.20) and 0.3 is narrower
+than it looks once real noise is added, which is why the cluster-share test is there.
+
+Proof should confirm both thresholds on one real run, as it did for `--min-likeness`, and report
+`largest_cluster_share`, the largest cluster's medoid, `usable / count` and `comparable_share` beside the score, so a
+rejection says *which* pose the outputs collapsed onto.
 
 ## Labels
 
@@ -262,9 +297,10 @@ Two caveats proof must carry into its report:
 From smk762/argus-proof#122:
 
 1. **Pose collapse gate.** Run `pose_set_stats` on the outputs (or `load_sidecars` on a folder `argus-puppet pose`
-   has processed). Reject with `pose_collapse` when `diversity < --min-pose-diversity` (suggested default 0.3).
-   Report `largest_cluster_share`, the largest cluster's `medoid`, and `usable / count`. A run with too few usable
-   poses (say under 10) is "not measurable", not a pass.
+   has processed). If `usable < 10`, `usable / count < 0.5` or `comparable_share < 0.8` the run is "not
+   measurable", not a pass. Otherwise reject with `pose_collapse` when `diversity < --min-pose-diversity`
+   (suggested 0.3) or `largest_cluster_share >= 0.75` (see [the suggested gate](#suggested-gate-for-proof)). Report
+   `largest_cluster_share`, the largest cluster's `medoid`, `usable / count` and `comparable_share`.
 2. **Training-distribution context.** Run `compare_pose_sets(outputs, training)`. A collapsed run with low
    `coverage_divergence` collapsed onto a pose that dominates the training set: a dataset-balance problem for
    curator's coverage panel. High divergence means the model drifted away from the training mix.

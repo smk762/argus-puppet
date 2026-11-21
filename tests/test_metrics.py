@@ -148,6 +148,70 @@ def test_average_linkage_matches_the_textbook_algorithm(seed: int) -> None:
         assert got == _naive_upgma(d, threshold)
 
 
+def _all_upgma_partitions(d: np.ndarray, threshold: float) -> set[frozenset[frozenset[int]]]:
+    """Every partition the textbook algorithm can reach when exact ties may be broken either way (NaN = inf)."""
+    d = np.where(np.isfinite(d), d, np.inf)
+    seen: set[frozenset[frozenset[int]]] = set()
+    out: set[frozenset[frozenset[int]]] = set()
+
+    def link(a: frozenset[int], b: frozenset[int]) -> float:
+        return float(np.mean([d[i, j] for i in a for j in b]))
+
+    def walk(clusters: frozenset[frozenset[int]]) -> None:
+        if clusters in seen:
+            return
+        seen.add(clusters)
+        pairs = [(link(a, b), a, b) for a, b in itertools.combinations(sorted(clusters, key=min), 2)]
+        best = min((v for v, _, _ in pairs), default=np.inf)
+        if not best < threshold:
+            out.add(clusters)
+            return
+        for v, a, b in pairs:
+            if np.isclose(v, best, rtol=0, atol=1e-9):
+                walk(clusters - {a, b} | {a | b})
+
+    walk(frozenset(frozenset([i]) for i in range(len(d))))
+    return out
+
+
+def _partition(labels: np.ndarray) -> frozenset[frozenset[int]]:
+    return frozenset(frozenset(np.flatnonzero(labels == r).tolist()) for r in set(labels.tolist()))
+
+
+@pytest.mark.parametrize("kind", ["nan", "ties", "duplicates"])
+def test_average_linkage_matches_the_textbook_algorithm_on_awkward_matrices(kind: str) -> None:
+    rng = np.random.default_rng({"nan": 50, "ties": 51, "duplicates": 52}[kind])
+    for _ in range(60):
+        n = int(rng.integers(3, 9))
+        p = rng.normal(size=(n, 2)) * rng.uniform(0.3, 2)
+        d = np.linalg.norm(p[:, None] - p[None], axis=-1)
+        if kind == "nan":
+            m = rng.random((n, n)) < 0.2
+            m = np.triu(m, 1)
+            d[m | m.T] = np.nan
+        elif kind == "ties":
+            d = np.round(d * 2)  # integer distances: many exact ties
+            np.fill_diagonal(d, 0.0)
+        else:
+            idx = rng.integers(0, n, size=n)
+            d = d[np.ix_(idx, idx)]  # repeated rows: zero distances between duplicates
+        for threshold in (0.5, 1.0, 2.0, 3.0):
+            labels = average_linkage(d, threshold)
+            assert _partition(labels) in _all_upgma_partitions(d, threshold)
+            assert np.array_equal(labels, average_linkage(d.copy(), threshold))  # deterministic
+
+
+def test_tied_clusters_do_not_depend_on_input_order_once_sorted() -> None:
+    # Exact ties make UPGMA's partition depend on the order it meets them; pose_set_stats sorts by image name first,
+    # so the stats do not depend on the order the results arrive in even then.
+    tri = [make("standing", tx=100 + 37 * k) for k in range(3)]  # three identical poses: every pair ties at 0
+    rs = [result(f"{k}.png", kp) for k, kp in enumerate([*tri, make("t_pose"), make("t_pose", tx=50)])]
+    rng = np.random.default_rng(9)
+    first = pose_set_stats(rs).model_dump()
+    for _ in range(5):
+        assert pose_set_stats([rs[i] for i in rng.permutation(len(rs))]).model_dump() == first
+
+
 def test_average_linkage_never_joins_an_incomparable_pair() -> None:
     d = np.array([[0, 0.1, np.nan], [0.1, 0, 0.1], [np.nan, 0.1, 0]])
     labels = average_linkage(d, 1.0)
@@ -169,15 +233,58 @@ def div(rs) -> float:
     return pose_set_stats(rs).diversity
 
 
-def test_diversity_calibration_one_jump_shot_scores_low() -> None:
-    rng = np.random.default_rng(5)
-    for pose in ("star_jump", "jump_tuck"):
-        d = div(sample(rng, [pose], 80))
-        assert 0.03 <= d <= 0.15, (pose, d)
+def gate_rejects(s) -> bool:
+    """The gate docs/metrics.md suggests to argus-proof (on sets with enough usable, comparable poses)."""
+    return s.diversity < 0.3 or s.largest_cluster_share >= 0.75
+
+
+def mixed(seed: int, share: float, n: int = 200):
+    """*share* of the set one jump shot (5 deg, 0.03), the rest the broad mix."""
+    rng = np.random.default_rng(seed)
+    k = round(share * n)
+    return sample(rng, ["star_jump"], k, prefix="a") + sample(rng, NAMES, n - k, angle=10, prefix="b")
+
+
+def test_diversity_calibration_pins_the_scale_and_the_formula() -> None:
+    # Bands tight enough that diversity_scale 0.25 (0.094 / 0.228) or 0.35 (0.049 / 0.126), or the non-squared
+    # 1 - exp(-d / s) (0.224 / 0.339), would fall outside them.
+    jump = div(sample(np.random.default_rng(5), ["star_jump"], 80))
+    assert 0.055 <= jump <= 0.08, jump
+    loose = div(sample(np.random.default_rng(7), ["star_jump"], 200, angle=8, noise=0.05))
+    assert 0.14 <= loose <= 0.19, loose
+    tuck = div(sample(np.random.default_rng(55), ["jump_tuck"], 80))
+    assert 0.03 <= tuck <= 0.065, tuck
 
 
 def test_diversity_calibration_a_broad_mix_scores_high() -> None:
-    assert div(sample(np.random.default_rng(6), NAMES, 120, angle=10)) >= 0.7
+    assert 0.86 <= div(sample(np.random.default_rng(6), NAMES, 120, angle=10)) <= 0.9
+
+
+def test_suggested_gate_rejects_collapse_and_passes_variety() -> None:
+    for share, seed in ((1.0, 7), (0.9, 13), (0.85, 14), (0.8, 15)):
+        s = pose_set_stats(mixed(seed, share))
+        assert gate_rejects(s), (share, s.diversity, s.largest_cluster_share)
+    assert pose_set_stats(mixed(13, 0.9)).diversity < 0.3  # diversity alone rejects 90 % one pose
+    for pool, seed in ((["star_jump", "seated"], 17), (["standing", "t_pose"], 31)):
+        s = pose_set_stats(sample(np.random.default_rng(seed), pool, 100))
+        assert not gate_rejects(s), (pool, s.diversity, s.largest_cluster_share)
+    assert not gate_rejects(pose_set_stats(mixed(16, 0.7)))
+
+
+def test_one_hip_lost_in_half_the_frames_does_not_lift_a_collapsed_set_over_the_gate() -> None:
+    # Regression: falling back to the one confident hip scored this set 0.35, over the 0.3 gate.
+    rng = np.random.default_rng(70)
+    rs = sample(rng, ["star_jump"], 200, angle=8, noise=0.05)
+    base = div(rs)
+    for score in (0.2, 0.0):
+        dropped = []
+        for k, r in enumerate(rs):
+            kp = r.people[0].keypoints_array()
+            if k % 2:
+                kp[11 + k % 4 // 2, 2] = score  # one hip, alternating sides
+            dropped.append(result(r.image, kp))
+        s = pose_set_stats(dropped)
+        assert s.diversity - base < 0.05 and s.diversity < 0.25 and s.largest_cluster_share == 1.0
 
 
 def test_diversity_is_monotone_in_spread() -> None:
@@ -188,15 +295,37 @@ def test_diversity_is_monotone_in_spread() -> None:
 
 def test_diversity_is_not_dominated_by_one_outlier() -> None:
     rng = np.random.default_rng(8)
-    base = sample(rng, ["standing"], 40)
+    n = 40
+    base = sample(rng, ["standing"], n)
     with_outlier = base + [result("zz-outlier.png", make("lying"))]
-    assert div(with_outlier) - div(base) < 0.06
+    a, b = pose_set_stats(base), pose_set_stats(with_outlier)
+    # One pose touches n of the n(n+1)/2 pairs, so it can add at most 2(1 - diversity) / (n + 1); a lying pose is
+    # different from every standing one, so it adds nearly that, and no more.
+    bound = 2 * (1 - a.diversity) / (n + 1)
+    assert 0.9 * bound <= b.diversity - a.diversity <= bound + 1e-9
+    # The raw mean distance, by contrast, is pulled up by far more than its share of the pairs.
+    assert b.mean_pairwise_distance > 1.5 * a.mean_pairwise_distance
 
 
 def test_diversity_is_stable_as_n_grows() -> None:
-    small = div(sample(np.random.default_rng(9), NAMES, 40, angle=10))
+    # An unbiased (U-) statistic: the mean over many 6-pose sets matches one 400-pose set. A V-statistic counting
+    # the diagonal would come out (n - 1) / n = 5/6 as large here (0.74 against 0.87).
+    small = np.mean([div(sample(np.random.default_rng(1000 + k), NAMES, 6, angle=10)) for k in range(40)])
     large = div(sample(np.random.default_rng(10), NAMES, 400, angle=10))
-    assert abs(small - large) < 0.06
+    assert abs(small - large) < 0.04
+
+
+def test_comparable_pairs_expose_the_denominator() -> None:
+    # Regression: 98 unusable images and 2 different poses scored 0.9 with nothing saying how little was measured.
+    rs = [result(f"u{i:02d}.png", None) for i in range(98)]
+    rs += [result("a.png", make("standing")), result("b.png", make("arms_up"))]
+    s = pose_set_stats(rs)
+    assert (s.usable, s.comparable_pairs, s.comparable_share) == (2, 1, 1.0)
+    legs_only = make("standing", dropout=(7, 8, 9, 10))
+    arms_only = make("standing", dropout=(13, 14, 15, 16))
+    s = pose_set_stats([result(f"{k}.png", kp) for k, kp in enumerate((legs_only, legs_only, arms_only, arms_only))])
+    assert s.usable == 4 and s.comparable_pairs == 2 and s.comparable_share == pytest.approx(2 / 6)
+    assert pose_set_stats([result("a.png", make("standing"))]).comparable_share == 0.0
 
 
 def test_diversity_is_zero_without_comparable_pairs() -> None:

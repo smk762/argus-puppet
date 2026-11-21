@@ -170,8 +170,9 @@ curl -s -X POST -H 'content-type: application/json' \
   -d '{"path": "lora-outputs/run-12"}' http://<PUPPET_HOST>:8110/stats
 ```
 
-The answer is a `PoseSetStats`: `count`, `usable`, `diversity` (0 to 1; argus-proof's pose-diversity gate reads
-this), `mean_pairwise_distance`, `cluster_count`, `largest_cluster_share`, `clusters` (largest first, each with a
+The answer is a `PoseSetStats`: `count`, `usable`, `comparable_pairs` and `comparable_share` (how many usable pairs
+the scores could compare), `diversity` (0 to 1; argus-proof's pose-diversity gate reads this, beside
+`largest_cluster_share`), `mean_pairwise_distance`, `cluster_count`, `largest_cluster_share`, `clusters` (largest first, each with a
 `medoid` image), `coverage` (counts per stance, arms and facing label), `items` (one per image, with its cluster,
 labels and a 2D point for a scatter plot), the `params` used, and the shared `estimator` when every pose came from
 the same one.
