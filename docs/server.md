@@ -151,7 +151,10 @@ missing. A sidecar that resolves outside the data root is skipped; one that is n
 request 422, naming the file relative to the data root. Giving both `results` and `path`, or neither, is 422.
 
 A set may hold at most `ARGUS_PUPPET_MAX_SET_RESULTS` poses (default 5000; 413 past it), because the distance
-matrix grows with the square of the set (5000 poses is a 100 MB matrix).
+matrix grows with the square of the set (5000 poses is a 100 MB matrix). An inline set is counted on the raw body
+before it is validated, so an oversized one is refused cheaply: a body may hold at most that many results per set
+(two sets for `/compare`) and at most `ARGUS_PUPPET_MAX_JSON_BYTES / 2048` people in all (a real person is about
+3.5 KB of JSON; validating JSON costs many times its size in memory). A `PoseResult` holds at most 500 people.
 
 Every metric is computed on each image's **primary** person. What the numbers mean, and their limits, is in
 [metrics.md](metrics.md).
@@ -235,7 +238,7 @@ jq -n --slurpfile p photo.pose.json '{pose: $p[0], options: {width: 1024, height
 | Status | When |
 |---|---|
 | 200 | `image/png` |
-| 413 | The canvas is over `ARGUS_PUPPET_MAX_PIXELS`, or more people would be drawn than `ARGUS_PUPPET_MAX_PEOPLE` |
+| 413 | The body is over 4 MiB (one pose of 500 people fits in 2 MB), the canvas is over `ARGUS_PUPPET_MAX_PIXELS`, or more people would be drawn than `ARGUS_PUPPET_MAX_PEOPLE` |
 | 422 | The body is not a valid `RenderRequest`, or the pose cannot be drawn |
 
 ### Errors common to the JSON routes
@@ -246,7 +249,7 @@ jq -n --slurpfile p photo.pose.json '{pose: $p[0], options: {width: 1024, height
 |---|---|
 | 400 | The body could not be read (for example a malformed `Content-Length`) |
 | 408 | The body did not arrive within `ARGUS_PUPPET_BODY_TIMEOUT_S` (default 60 s) |
-| 413 | The body is larger than `ARGUS_PUPPET_MAX_JSON_BYTES` (default 128 MiB), or a set is over the set cap |
+| 413 | The body is larger than `ARGUS_PUPPET_MAX_JSON_BYTES` (default 128 MiB; 4 MiB for `/render`), a set is over the set cap, or the body holds more people than its size allows |
 | 415 | `Content-Type` is present and is not `application/json` |
 | 422 | The body is not valid JSON for the route's model |
 | 503 | Busy (see below) |
@@ -328,5 +331,5 @@ depend on:
 | `ARGUS_PUPPET_MAX_SCAN_IMAGES` | 2000 | `/pose/scan` |
 | `ARGUS_PUPPET_POSE_CONCURRENCY` | 2 | `/pose`; separately, `/stats` + `/compare` + `/render` |
 | `ARGUS_PUPPET_MAX_SET_RESULTS` | 5000 | each set of `/stats` and `/compare` |
-| `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | `/stats`, `/compare`, `/render` bodies |
+| `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | `/stats`, `/compare` bodies (and people per body: this / 2048); `/render` bodies up to 4 MiB |
 | `ARGUS_PUPPET_BODY_TIMEOUT_S` | 60 | every `POST` body (408 past it) |

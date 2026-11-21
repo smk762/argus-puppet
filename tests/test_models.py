@@ -10,8 +10,10 @@ from pydantic import ValidationError
 
 from argus_puppet import registry
 from argus_puppet.models import (
+    MAX_PEOPLE,
     PUPPET_VERSION,
     SIDECAR_SUFFIX,
+    BarePose,
     Coverage,
     DistanceQuantiles,
     EstimatorProvenance,
@@ -98,6 +100,17 @@ def test_primary_must_agree_with_the_flags() -> None:
     with pytest.raises(ValidationError, match="flagged primary are"):
         result(primary=1)
     assert result(people=[], primary=None).primary_person is None
+
+
+def test_a_pose_holds_at_most_max_people() -> None:
+    p = person()
+    assert len(result(people=[p] * MAX_PEOPLE, primary=None).people) == MAX_PEOPLE
+    with pytest.raises(ValidationError, match="at most 500"):
+        result(people=[p] * (MAX_PEOPLE + 1), primary=None)
+    kp = keypoints().tolist()
+    assert len(BarePose(keypoints=[kp] * MAX_PEOPLE, width=9, height=9).people()) == MAX_PEOPLE
+    with pytest.raises(ValidationError):
+        BarePose(keypoints=[kp] * (MAX_PEOPLE + 1), width=9, height=9)
 
 
 def test_keypoints_are_exactly_133_finite_and_scored_in_unit_range() -> None:

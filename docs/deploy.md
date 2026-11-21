@@ -122,7 +122,7 @@ All `ARGUS_PUPPET_*` settings are read in `src/argus_puppet/config.py`:
 | `ARGUS_PUPPET_MAX_SCAN_IMAGES` | 2000 | Images one `POST /pose/scan` processes. The rest are skipped |
 | `ARGUS_PUPPET_POSE_CONCURRENCY` | 2 | `POST /pose` calls in flight at once, and separately `POST /stats`, `/compare` and `/render` calls together (1 to 64). Past it a call gets 503 with `Retry-After` |
 | `ARGUS_PUPPET_MAX_SET_RESULTS` | 5000 | Poses in one set of `POST /stats` or `/compare` (the distance matrix grows with the square). Past it: 413 |
-| `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | Largest JSON body `POST /stats`, `/compare` and `/render` accept. Past it: 413 |
+| `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | Largest JSON body `POST /stats` and `/compare` accept (`/render` takes at most 4 MiB), and with it the people one body may carry (this / 2048). Past it: 413 |
 | `ARGUS_PUPPET_BODY_TIMEOUT_S` | 60 | Seconds any `POST` body may take to arrive, upload or JSON. Past it: 408, the connection is closed and the call's admission slot is freed, so a slow client cannot hold one |
 | `ARGUS_PUPPET_AGE_URL` | unset | argus-curator's base URL, for `argus-puppet library build --age-check` only. Unset: the check cannot run and nothing is sent ([index.md](index.md#privacy-and-the-age-fail-safe)) |
 

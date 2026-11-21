@@ -57,10 +57,11 @@
                 "minItems": 133,
                 "type": "array"
               },
+              "maxItems": 500,
               "type": "array"
             }
           ],
-          "description": "One person's 133 (x, y, score) points, or a list of such people.",
+          "description": "One person's 133 (x, y, score) points, or a list of such people (at most 500).",
           "title": "Keypoints"
         },
         "width": {
@@ -963,10 +964,11 @@
           "type": "string"
         },
         "people": {
-          "description": "Every person found, largest first.",
+          "description": "Every person found, largest first (at most 500: ARGUS_PUPPET_MAX_PEOPLE's ceiling).",
           "items": {
             "$ref": "#/$defs/PersonPose"
           },
+          "maxItems": 500,
           "title": "People",
           "type": "array"
         },

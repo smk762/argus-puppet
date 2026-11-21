@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -76,6 +77,10 @@ MULTIPART_OVERHEAD = 64 * 1024
 RAW_TYPES = ("application/octet-stream", "image/")
 # A ScanRequest is a path and two flags: anything past this is not one.
 SCAN_JSON_BYTES = 16 * 1024
+# A RenderRequest is one pose: 500 people (models.MAX_PEOPLE) with real coordinates are under 2 MB. A bare pose's
+# people share one "keypoints" key, so they cannot be counted on the raw bytes like a set's: this cap bounds them
+# (zero-filled people cost ~1 KB of JSON and ~18 KB validated).
+RENDER_JSON_BYTES = 4 * 1024 * 1024
 BUSY_RETRY_S = 1
 GPU_RETRY_S = 5
 
@@ -258,18 +263,83 @@ def health(state: AppState) -> Health:
 M = TypeVar("M", bound=BaseModel)
 
 
-async def read_json(request: Request, model: type[M], cap: int, *, timeout: float) -> M:
+async def read_json(
+    request: Request,
+    model: type[M],
+    cap: int,
+    *,
+    timeout: float,
+    precheck: Callable[[bytes], None] | None = None,
+) -> M:
     """The JSON body of a ``POST`` as *model*: at most *cap* bytes (413), within *timeout* seconds (408), JSON (415
-    otherwise), valid (422 with the errors, never echoing the input). Validation runs off the event loop: a large set
-    takes a while."""
+    otherwise), valid (422 with the errors, never echoing the input). *precheck* looks at the raw bytes first (it raises
+    to refuse). Both run off the event loop: a large set takes a while."""
     content_type = (request.headers.get("content-type") or "").lower()
     if content_type and not content_type.startswith("application/json"):
         raise HTTPException(415, "send the request as application/json")
     body = await read_capped(request, cap, timeout=timeout, what="request body")
+
+    def validate() -> M:
+        if precheck is not None:
+            precheck(body)
+        return model.model_validate_json(body)
+
     try:
-        return await asyncio.to_thread(model.model_validate_json, body)
+        return await asyncio.to_thread(validate)
     except ValidationError as exc:
         raise HTTPException(422, exc.errors(include_url=False, include_input=False, include_context=False)) from None
+
+
+def _key_counter(key: str) -> Callable[[bytes], int]:
+    """An upper bound on how many times JSON object key *key* occurs in a raw body, from its bytes alone (C-speed
+    scans, no parse): written literally (a ``"`` inside a string is escaped, so a string value cannot fake one), or
+    with at least one of its characters escaped as ``\\u00XX`` (each such escape counted once, as a decoder accepts
+    them). No JSON encoder escapes ASCII letters, digits or ``_`` unasked, so a legitimate body's escapes (non-ASCII
+    names) never inflate the count."""
+    literal = b'"' + key.encode("ascii") + b'"'
+    codes = b"|".join(sorted({f"{ord(c):02x}".encode() for c in key}))
+    escape = re.compile(rb"\\u00(?:" + codes + rb")", re.IGNORECASE)
+
+    def count(body: bytes) -> int:
+        return body.count(literal) + len(escape.findall(body))
+
+    return count
+
+
+max_results_in = _key_counter("image_sha256")  # one per PoseResult
+max_people_in = _key_counter("keypoints")  # one per person (PersonPose, or a bare render pose)
+# The least JSON a real person takes (133 points with real coordinates are ~3.3 KB). A set body may carry at most
+# max_json_bytes / this many people, so zero-filled people (~1 KB each, ~18 KB once validated) buy no more of them
+# than real ones of the same size would.
+PERSON_JSON_FLOOR = 2048
+
+
+def set_precheck(settings: Settings, sets: int) -> Callable[[bytes], None]:
+    """413 for a body that cannot fit *sets* sets of ``max_set_results``, or holds more people than its size allows,
+    decided on the raw bytes before anything is validated. Validation costs 15-40 times the body's size in memory,
+    and pydantic's own list ``max_length`` does not help: its error holds the whole list, converted."""
+    results_limit = settings.max_set_results * sets
+    people_limit = settings.max_json_bytes // PERSON_JSON_FLOOR
+
+    def check(body: bytes) -> None:
+        n = max_results_in(body)
+        if n > results_limit:
+            if sets == 1:
+                raise _too_many(n, settings)
+            raise HTTPException(
+                413,
+                f"{n} poses in one request is over the cap of {sets} sets of {settings.max_set_results} "
+                "(ARGUS_PUPPET_MAX_SET_RESULTS)",
+            )
+        people = max_people_in(body)
+        if people > people_limit:
+            raise HTTPException(
+                413,
+                f"{people} people in one request is over the cap of {people_limit} "
+                f"(ARGUS_PUPPET_MAX_JSON_BYTES / {PERSON_JSON_FLOOR})",
+            )
+
+    return check
 
 
 def _too_many(n: int, settings: Settings) -> HTTPException:
@@ -443,7 +513,9 @@ def create_app(
         """Pose diversity, clusters and coverage of one set: ``StatsRequest`` (results, or a sidecar folder under the
         data root, and optional ``params``). Writes nothing."""
         async with state.compute_admit.slot():
-            req = await read_json(request, StatsRequest, cap, timeout=settings.body_timeout_s)
+            req = await read_json(
+                request, StatsRequest, cap, timeout=settings.body_timeout_s, precheck=set_precheck(settings, 1)
+            )
             results = await asyncio.to_thread(load_set, settings, req, "set")
             return await asyncio.to_thread(metrics.pose_set_stats, results, params=req.params)
 
@@ -451,7 +523,9 @@ def create_app(
     async def post_compare(request: Request) -> PoseSetComparison:
         """An output set's poses against a reference set: ``CompareRequest``. Writes nothing."""
         async with state.compute_admit.slot():
-            req = await read_json(request, CompareRequest, cap, timeout=settings.body_timeout_s)
+            req = await read_json(
+                request, CompareRequest, cap, timeout=settings.body_timeout_s, precheck=set_precheck(settings, 2)
+            )
             outputs = await asyncio.to_thread(load_set, settings, req.outputs, "outputs")
             reference = await asyncio.to_thread(load_set, settings, req.reference, "reference")
             threshold = compare.DEFAULT_CLOSE_THRESHOLD if req.threshold is None else req.threshold
@@ -463,7 +537,7 @@ def create_app(
     async def post_render(request: Request) -> Response:
         """An OpenPose-convention control PNG for one pose: ``RenderRequest``. Writes nothing."""
         async with state.compute_admit.slot():
-            req = await read_json(request, RenderRequest, cap, timeout=settings.body_timeout_s)
+            req = await read_json(request, RenderRequest, min(cap, RENDER_JSON_BYTES), timeout=settings.body_timeout_s)
             check_render(settings, req)
             try:
                 png = await asyncio.to_thread(render_request, req)

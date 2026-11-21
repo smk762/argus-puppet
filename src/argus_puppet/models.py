@@ -45,6 +45,8 @@ SCHEMA_PATH = Path("schema/puppet-wire.schema.json")
 
 # A pose sidecar sits beside its image as ``<stem>.pose.json`` (``<stem>.json`` is another package's sidecar).
 SIDECAR_SUFFIX = ".pose.json"
+# The most people one PoseResult (or a bare render pose) may hold: the ceiling of ARGUS_PUPPET_MAX_PEOPLE.
+MAX_PEOPLE = 500
 
 _Versioned = make_versioned_base(
     "puppet_version", PUPPET_VERSION, SUPPORTED_PUPPET_MAJORS, label="puppet_version", class_name="_Versioned"
@@ -177,7 +179,11 @@ class PoseResult(_Versioned):
     width: int = Field(..., ge=1, description="Image width in pixels, after EXIF orientation.")
     height: int = Field(..., ge=1, description="Image height in pixels, after EXIF orientation.")
     layout: Layout = Field(LAYOUT, description="Keypoint layout of every person.")
-    people: list[PersonPose] = Field(default_factory=list, description="Every person found, largest first.")
+    people: list[PersonPose] = Field(
+        default_factory=list,
+        max_length=MAX_PEOPLE,
+        description="Every person found, largest first (at most 500: ARGUS_PUPPET_MAX_PEOPLE's ceiling).",
+    )
     primary: int | None = Field(
         None, ge=0, description="Index into people of the primary subject; null when there is nobody."
     )
@@ -684,8 +690,8 @@ class CompareRequest(BaseModel):
 class BarePose(BaseModel):
     """People's keypoints without the rest of a PoseResult: one person (133 points) or a list of people."""
 
-    keypoints: Keypoints | list[Keypoints] = Field(
-        ..., description="One person's 133 (x, y, score) points, or a list of such people."
+    keypoints: Keypoints | Annotated[list[Keypoints], Field(max_length=MAX_PEOPLE)] = Field(
+        ..., description="One person's 133 (x, y, score) points, or a list of such people (at most 500)."
     )
     width: int = Field(..., ge=1, le=65535, description="The keypoints' frame width in pixels.")
     height: int = Field(..., ge=1, le=65535, description="The keypoints' frame height in pixels.")

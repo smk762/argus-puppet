@@ -21,7 +21,7 @@ from argus_puppet.extract import write_sidecar
 from argus_puppet.metrics import pose_set_stats
 from argus_puppet.models import PoseSetComparison, PoseSetStats, sidecar_path
 from argus_puppet.render import render_png
-from argus_puppet.server.app import create_app
+from argus_puppet.server.app import RENDER_JSON_BYTES, create_app
 
 NAMES = list(PRESETS)
 
@@ -124,6 +124,47 @@ def test_set_size_and_body_caps(settings, root) -> None:
     assert small.post("/stats", json={"path": "set"}).status_code == 413
     tiny = client(settings, max_json_bytes=2048)
     assert tiny.post("/stats", json={"results": body(rs)}).status_code == 413
+
+
+def test_the_set_cap_bites_before_the_body_is_validated(settings) -> None:
+    """A body with more results than the cap is refused on a count of its bytes, before any result is validated
+    (a 127 MB body of tiny results once cost ~1 GB and seconds of validation before the 413)."""
+    rs = body(poses(n=3))
+    poisoned = [*rs, {"not": "a pose"}]  # validating it would answer 422, so a 413 means nothing was validated
+    small = client(settings, max_set_results=2)
+    reply = small.post("/stats", json={"results": poisoned})
+    assert reply.status_code == 413 and "ARGUS_PUPPET_MAX_SET_RESULTS" in reply.json()["detail"]
+    escaped = json.dumps({"results": poisoned}).replace('"image_sha256"', '"image\\u005fsha256"')
+    reply = small.post("/stats", content=escaped, headers={"content-type": "application/json"})
+    assert reply.status_code == 413, "an escaped key must not slip past the count"
+    pair = {"outputs": {"results": poisoned}, "reference": {"results": rs[:2]}}
+    assert small.post("/compare", json=pair).status_code == 413  # 5 results in all: over 2 sets of 2
+    fits = {"outputs": {"results": rs[:2]}, "reference": {"results": rs[:2]}}
+    assert small.post("/compare", json=fits).status_code == 200  # each set counts against the cap on its own
+    named = [dict(r, image=f"caf\u00e9-{k}.png") for k, r in enumerate(rs[:2])]
+    ascii_body = json.dumps({"results": named}, ensure_ascii=True)  # \u escapes in values cost nothing
+    assert "\\u00e9" in ascii_body
+    reply = small.post("/stats", content=ascii_body, headers={"content-type": "application/json"})
+    assert reply.status_code == 200, reply.text
+
+
+def test_people_are_counted_before_the_body_is_validated(settings) -> None:
+    """Zero-filled people cost ~1 KB of JSON and ~18 KB validated: a set body may carry no more of them than its size
+    allows real ones (ARGUS_PUPPET_MAX_JSON_BYTES / PERSON_JSON_FLOOR); a render body is capped at 4 MiB."""
+    r = poses(n=1)[0]
+    zero = dict(r.people[0].model_dump(mode="json"), keypoints=[[0, 0, 0]] * 133, primary=False)
+    crowd = dict(r.model_dump(mode="json"), people=[zero] * 40, primary=None, height=0)  # invalid: 422 if read
+    c = client(settings, max_json_bytes=64 * 1024)  # room for 32 people
+    reply = c.post(
+        "/stats",
+        content=json.dumps({"results": [crowd]}, separators=(",", ":")).encode(),
+        headers={"content-type": "application/json"},
+    )
+    assert reply.status_code == 413 and "people" in reply.json()["detail"]
+    kp = [[0, 0, 0]] * 133
+    big = {"pose": {"keypoints": [kp] * 5000, "width": 9, "height": 9}}  # ~5 MB of bare people
+    reply = client(settings).post("/render", json=big)
+    assert reply.status_code == 413 and str(RENDER_JSON_BYTES) in reply.json()["detail"]
 
 
 # ── /compare ─────────────────────────────────────────────────────────────────────────────────────────────────────

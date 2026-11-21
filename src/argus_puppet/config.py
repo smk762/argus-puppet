@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 from argus_puppet import registry
+from argus_puppet.models import MAX_PEOPLE
 
 DEFAULT_PORT = 8220
 DEFAULT_MODEL_DIR = Path("~/.cache/argus_puppet/models")
@@ -23,8 +24,8 @@ DEFAULT_MAX_SCAN_IMAGES = 2000
 DEFAULT_POSE_CONCURRENCY = 2
 # Pose results one POST /stats or /compare takes per set: the distance matrix is O(N^2) (5000 is a 100 MB matrix).
 DEFAULT_MAX_SET_RESULTS = 5000
-# Largest JSON body POST /stats, /compare and /render read. A one-person result is ~5-10 KB of JSON, so two sets of
-# 5000 fit with room to spare.
+# Largest JSON body POST /stats and /compare read (/render reads at most 4 MiB). A one-person result is ~3.5 KB of
+# JSON, so two sets of 5000 fit with room for crowds. A body may also carry at most this / 2048 people.
 DEFAULT_MAX_JSON_BYTES = 128 * 1024 * 1024
 # Seconds a request body may take to arrive (every POST); past it the call is answered 408 and its admission slot
 # freed. 60 s carries a full 50 MiB upload at about 1 MB/s.
@@ -116,8 +117,8 @@ class Settings:
             raise ConfigError(f"ARGUS_PUPPET_MAX_UPLOAD_BYTES {self.max_upload_bytes}: must be at least 1024")
         if self.max_pixels < 64 * 64:
             raise ConfigError(f"ARGUS_PUPPET_MAX_PIXELS {self.max_pixels}: must be at least {64 * 64}")
-        if not 1 <= self.max_people <= 500:
-            raise ConfigError(f"ARGUS_PUPPET_MAX_PEOPLE {self.max_people}: must be between 1 and 500")
+        if not 1 <= self.max_people <= MAX_PEOPLE:
+            raise ConfigError(f"ARGUS_PUPPET_MAX_PEOPLE {self.max_people}: must be between 1 and {MAX_PEOPLE}")
         for setting, value in (("DET_THRESHOLD", self.det_threshold), ("NMS_IOU", self.nms_iou)):
             if not 0.0 < value < 1.0:
                 raise ConfigError(f"ARGUS_PUPPET_{setting} {value}: must be between 0 and 1 (exclusive)")
