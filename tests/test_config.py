@@ -19,7 +19,7 @@ def _clean_env(monkeypatch) -> None:
 
 def test_defaults() -> None:
     s = Settings.from_env()
-    assert s.port == DEFAULT_PORT == 8110
+    assert s.port == DEFAULT_PORT == 8220
     assert s.model_dir == Path("~/.cache/argus_puppet/models").expanduser()
     assert (s.pose_model, s.detector_model) == (registry.DEFAULT_POSE, registry.DEFAULT_DETECTOR)
     assert s.device == "auto" and s.gpu_mem_limit_mb is None

@@ -6,7 +6,7 @@ Guidance for AI agents working in this repo. Human-facing usage lives in [README
 
 ## What this is
 
-Body pose for the Argus suite: whole-body keypoints, pose embeddings, diversity and coverage metrics, and ControlNet pose conditioning (:8110)
+Body pose for the Argus suite: whole-body keypoints, pose embeddings, diversity and coverage metrics, and ControlNet pose conditioning (:8220)
 
 Shared code — the target taxonomy, wire-schema versioning, and the local/remote model contract — lives in **argus-cortex**; import it rather than re-implementing.
 

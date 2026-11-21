@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "argus-puppet"
 dynamic = ["version"]
-description = "Body pose for the Argus suite: whole-body keypoints, pose embeddings, diversity and coverage metrics, and ControlNet pose conditioning (:8110)"
+description = "Body pose for the Argus suite: whole-body keypoints, pose embeddings, diversity and coverage metrics, and ControlNet pose conditioning (:8220)"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"

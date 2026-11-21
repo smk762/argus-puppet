@@ -9,7 +9,7 @@ from typing import Literal
 
 from argus_puppet import registry
 
-DEFAULT_PORT = 8110
+DEFAULT_PORT = 8220
 DEFAULT_MODEL_DIR = Path("~/.cache/argus_puppet/models")
 DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 DEFAULT_MAX_PIXELS = 40_000_000

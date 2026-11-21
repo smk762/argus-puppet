@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# argus-puppet: the pose service on :8110. One file, two images:
+# argus-puppet: the pose service on :8220. One file, two images:
 #
 #   docker build --build-arg VERSION=0.1.0 -t argus-puppet .                     # CPU  (:<version>)
 #   docker build --build-arg VERSION=0.1.0 --build-arg GPU=1 -t argus-puppet:gpu .  # CUDA (:<version>-gpu)
@@ -65,9 +65,9 @@ ENV ARGUS_PUPPET_MODEL_DIR=/models \
 VOLUME /models
 USER puppet
 
-EXPOSE 8110
+EXPOSE 8220
 # GET /health may hash the model files once on its first call, hence the generous start period. No curl in slim.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8110/health', timeout=8)"]
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8220/health', timeout=8)"]
 # 0.0.0.0 inside the container; which host address it is published on is compose's (or `docker run -p`'s) choice.
-CMD ["argus-puppet", "serve", "--host", "0.0.0.0", "--port", "8110"]
+CMD ["argus-puppet", "serve", "--host", "0.0.0.0", "--port", "8220"]

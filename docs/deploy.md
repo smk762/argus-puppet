@@ -7,7 +7,7 @@ argus-puppet ships as two container images built from one `Dockerfile`:
 | `ghcr.io/smk762/argus-puppet:<version>` (also `:<major>.<minor>`, `:latest`) | `GPU=0` (default) | ONNX Runtime on the CPU |
 | `ghcr.io/smk762/argus-puppet:<version>-gpu` (also `:<major>.<minor>-gpu`, `:latest-gpu`) | `GPU=1` | ONNX Runtime CUDA |
 
-Both serve the HTTP API on port **8110** and run as an unprivileged user (uid 10001).
+Both serve the HTTP API on port **8220** and run as an unprivileged user (uid 10001).
 
 The GPU image brings the CUDA and cuDNN runtimes as NVIDIA's pip wheels (`onnxruntime-gpu[cuda,cudnn]`), so it
 needs no CUDA base image. It does need the NVIDIA container runtime on the host and a driver new enough for the
@@ -38,7 +38,7 @@ read-only (`-v <MODEL_DIR>:/models:ro`).
 
 ```bash
 docker run -d --name argus-puppet \
-  -p 127.0.0.1:8110:8110 \
+  -p 127.0.0.1:8220:8220 \
   -v puppet-models:/models \
   ghcr.io/smk762/argus-puppet:latest
 ```
@@ -47,7 +47,7 @@ docker run -d --name argus-puppet \
 
 ```bash
 docker run -d --name argus-puppet --gpus all \
-  -p 127.0.0.1:8110:8110 \
+  -p 127.0.0.1:8220:8220 \
   -v puppet-models:/models \
   ghcr.io/smk762/argus-puppet:latest-gpu
 ```
@@ -70,7 +70,7 @@ The compose file reads these variables from the shell or a `.env` file:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PUPPET_PUBLISH` | `127.0.0.1:8110` | The host address and port to publish on |
+| `PUPPET_PUBLISH` | `127.0.0.1:8220` | The host address and port to publish on |
 | `PUPPET_TAG` | `latest` | The image tag. The GPU service appends `-gpu` |
 | `PUPPET_DATA_DIR` | `./data` | The host directory for the optional data-root bind (commented out by default) |
 
@@ -95,7 +95,7 @@ files, so the check allows a 60 s start period. `provider` is `null` until the f
 A quick end-to-end test:
 
 ```bash
-curl -s -X POST -H 'content-type: image/jpeg' --data-binary @photo.jpg 'http://127.0.0.1:8110/pose?name=photo.jpg'
+curl -s -X POST -H 'content-type: image/jpeg' --data-binary @photo.jpg 'http://127.0.0.1:8220/pose?name=photo.jpg'
 ```
 
 ## Environment variables
@@ -105,7 +105,7 @@ All `ARGUS_PUPPET_*` settings are read in `src/argus_puppet/config.py`:
 | Variable | Default | Meaning |
 |---|---|---|
 | `ARGUS_PUPPET_MODEL_DIR` | `/models` in the image (`~/.cache/argus_puppet/models` outside it) | Where the pinned model files live |
-| `ARGUS_PUPPET_PORT` | `8110` | Port, when `serve` gets no `--port`. The image passes `--port 8110` |
+| `ARGUS_PUPPET_PORT` | `8220` | Port, when `serve` gets no `--port`. The image passes `--port 8220` |
 | `ARGUS_PUPPET_DEVICE` | `auto` | `auto`, `cpu` or `cuda`. `cuda` on the CPU image falls back to the CPU |
 | `ARGUS_PUPPET_GPU_MEM_LIMIT_MB` | runtime default | A cap on each ONNX Runtime CUDA session's arena, in MB (at least 256) |
 | `ARGUS_PUPPET_POSE_MODEL` | registry default | The pose model, by registry name (`argus-puppet models list`) |
@@ -147,7 +147,7 @@ To enable scans, bind the dataset into the container and point the data root at 
 
 ```bash
 docker run -d --name argus-puppet \
-  -p 127.0.0.1:8110:8110 \
+  -p 127.0.0.1:8220:8220 \
   -v puppet-models:/models \
   -v <DATA_DIR>:/data \
   -e ARGUS_PUPPET_DATA_ROOT=/data \

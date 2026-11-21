@@ -11,6 +11,7 @@ from typer.testing import CliRunner
 from argus_puppet import estimator as estimator_mod
 from argus_puppet import registry, weights
 from argus_puppet.cli import app
+from argus_puppet.config import DEFAULT_PORT
 from argus_puppet.models import PUPPET_VERSION, SCHEMA_PATH, render_wire_schema
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -132,7 +133,7 @@ def test_serve_binds_loopback_by_default(monkeypatch) -> None:
     fake_uvicorn.run = lambda app_, host, port: calls.update(host=host, port=port, app=app_)
     monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
     assert runner.invoke(app, ["serve"]).exit_code == 0
-    assert (calls["host"], calls["port"]) == ("127.0.0.1", 8110)
+    assert (calls["host"], calls["port"]) == ("127.0.0.1", DEFAULT_PORT)
     assert runner.invoke(app, ["serve", "--port", "9001", "--host", "0.0.0.0"]).exit_code == 0
     assert (calls["host"], calls["port"]) == ("0.0.0.0", 9001)
 

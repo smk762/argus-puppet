@@ -1,4 +1,4 @@
-# argus-puppet: the pose service on :8110 (docs/deploy.md).
+# argus-puppet: the pose service on :8220 (docs/deploy.md).
 #
 #   docker compose up -d                                   # the CPU image
 #   docker compose --profile gpu up -d puppet-gpu          # the CUDA image instead (needs the NVIDIA runtime)
@@ -13,7 +13,7 @@
 x-puppet: &puppet
   restart: unless-stopped
   ports:
-    - "${PUPPET_PUBLISH:-127.0.0.1:8110}:8110"
+    - "${PUPPET_PUBLISH:-127.0.0.1:8220}:8220"
   environment: &puppet-env
     ARGUS_PUPPET_MODEL_DIR: /models
     ARGUS_PUPPET_READ_ONLY: ${ARGUS_PUPPET_READ_ONLY:-0}

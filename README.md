@@ -4,7 +4,7 @@ Body pose for the Argus suite. Puppet finds every person in an image, places 133
 (body, feet, hands and face), and turns those keypoints into numbers other packages can act on: how varied a set of
 poses is, which poses dominate it, whether outputs sit closer to training frames' poses than those frames sit to
 each other, and skeleton control images
-that drive a pose ControlNet. It is a library, a CLI and an HTTP service on port 8110. It has no Studio stage of its
+that drive a pose ControlNet. It is a library, a CLI and an HTTP service on port 8220. It has no Studio stage of its
 own: argus-proof, argus-curator, argus-darkroom and the others call it, as they call argus-retina's detectors.
 
 Part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus). Shared code (wire-schema versioning,
@@ -98,8 +98,8 @@ png = render_png(result, RenderOptions(width=1024, height=1024, stroke_scale="au
 ### The service
 
 ```bash
-ARGUS_PUPPET_DATA_ROOT=~/datasets argus-puppet serve     # binds 127.0.0.1:8110 by default
-curl -s -X POST -H 'content-type: image/jpeg' --data-binary @photo.jpg 'http://127.0.0.1:8110/pose?name=photo.jpg'
+ARGUS_PUPPET_DATA_ROOT=~/datasets argus-puppet serve     # binds 127.0.0.1:8220 by default
+curl -s -X POST -H 'content-type: image/jpeg' --data-binary @photo.jpg 'http://127.0.0.1:8220/pose?name=photo.jpg'
 ```
 
 There is **no authentication**: anyone who can reach the port can use the service. Keep it on loopback or behind a

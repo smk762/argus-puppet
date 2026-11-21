@@ -4,7 +4,7 @@ argus-puppet owns body pose for the Argus suite. It finds the people in an image
 keypoints on each: 17 body joints, 6 foot points, 68 face landmarks and 21 points per hand, in the COCO-WholeBody
 layout. From those keypoints it measures sets of images (how varied the poses are, which pose dominates, whether an
 output copies a training frame's pose) and draws skeleton control images that steer a pose ControlNet. Other
-packages call it as a Python library, through the `argus-puppet` CLI, or over HTTP on port 8110. It needs no GPU:
+packages call it as a Python library, through the `argus-puppet` CLI, or over HTTP on port 8220. It needs no GPU:
 everything runs on ONNX Runtime, on the CPU or on CUDA.
 
 ## The pipeline

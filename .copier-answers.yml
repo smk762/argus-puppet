@@ -6,7 +6,7 @@ author: smk762
 brand_mark: false
 cli_name: argus-puppet
 description: 'Body pose for the Argus suite: whole-body keypoints, pose embeddings,
-    diversity and coverage metrics, and ControlNet pose conditioning (:8110)'
+    diversity and coverage metrics, and ControlNet pose conditioning (:8220)'
 dockerfile: Dockerfile
 github_owner: smk762
 has_cli: true

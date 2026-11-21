@@ -1,4 +1,4 @@
-"""The argus-puppet HTTP service (``:8110``): pose one uploaded image, or a folder under the data root.
+"""The argus-puppet HTTP service (``:8220``): pose one uploaded image, or a folder under the data root.
 
 Routes:
 

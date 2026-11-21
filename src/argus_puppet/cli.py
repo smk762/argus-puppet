@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, get_args
 import typer
 from typer import Argument, Option
 
-from argus_puppet.config import DEVICES, ConfigError, Settings
+from argus_puppet.config import DEFAULT_PORT, DEVICES, ConfigError, Settings
 from argus_puppet.models import SCHEMA_PATH, Arms, Facing, Fit, Stance
 
 if TYPE_CHECKING:
@@ -715,7 +715,7 @@ def library_sample(
 @app.command()
 def serve(
     host: str = Option("127.0.0.1", "--host", help="Interface to bind (loopback by default: there is no auth)"),
-    port: int | None = Option(None, "--port", help="Port (default: ARGUS_PUPPET_PORT, else 8110)"),
+    port: int | None = Option(None, "--port", help=f"Port (default: ARGUS_PUPPET_PORT, else {DEFAULT_PORT})"),
 ) -> None:
     """Run the HTTP service (needs the server extra)."""
     try:

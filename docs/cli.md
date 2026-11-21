@@ -184,7 +184,7 @@ $ argus-puppet serve [OPTIONS]
 **Options**:
 
 * `--host <str>`: Interface to bind (loopback by default: there is no auth)  [default: 127.0.0.1]
-* `--port <int>`: Port (default: ARGUS_PUPPET_PORT, else 8110)
+* `--port <int>`: Port (default: ARGUS_PUPPET_PORT, else 8220)
 * `--help`: Show this message and exit.
 
 ## `argus-puppet models`

@@ -1,6 +1,6 @@
 # The HTTP service
 
-`argus-puppet serve` runs a FastAPI app on port **8110** (`ARGUS_PUPPET_PORT`, or `--port`). It binds `127.0.0.1`
+`argus-puppet serve` runs a FastAPI app on port **8220** (`ARGUS_PUPPET_PORT`, or `--port`). It binds `127.0.0.1`
 unless `--host` says otherwise; the container image binds `0.0.0.0` inside the container and `compose.yaml`
 publishes it on the host's loopback (see [deploy.md](deploy.md)). The app is `argus_puppet.server.app:app`, and
 `create_app(settings)` builds one from explicit settings. FastAPI's own `/docs` and `/openapi.json` are served too.
@@ -30,7 +30,7 @@ Whether each pinned model file is present and verified, which models requests us
 read-only mode.
 
 ```bash
-curl -s http://<PUPPET_HOST>:8110/health
+curl -s http://<PUPPET_HOST>:8220/health
 ```
 
 ```json
@@ -69,10 +69,10 @@ type), or as `multipart/form-data`, where the first file part is used.
 
 ```bash
 curl -s -X POST -H 'content-type: image/jpeg' --data-binary @photo.jpg \
-  'http://<PUPPET_HOST>:8110/pose?name=photo.jpg'
-curl -s -X POST -F file=@photo.jpg 'http://<PUPPET_HOST>:8110/pose'
+  'http://<PUPPET_HOST>:8220/pose?name=photo.jpg'
+curl -s -X POST -F file=@photo.jpg 'http://<PUPPET_HOST>:8220/pose'
 curl -s -X POST -H 'X-Argus-Priority: background' -H 'content-type: image/jpeg' --data-binary @photo.jpg \
-  'http://<PUPPET_HOST>:8110/pose?face=212,80,96,110'
+  'http://<PUPPET_HOST>:8220/pose?face=212,80,96,110'
 ```
 
 The answer is a `PoseResult`: the same document as a sidecar. The README's [sidecar section](https://github.com/smk762/argus-puppet#the-sidecar)
@@ -104,7 +104,7 @@ that changes files.
 
 ```bash
 curl -s -X POST -H 'content-type: application/json' \
-  -d '{"path": "shoots/2026-10", "recursive": true}' http://<PUPPET_HOST>:8110/pose/scan
+  -d '{"path": "shoots/2026-10", "recursive": true}' http://<PUPPET_HOST>:8220/pose/scan
 ```
 
 The answer is a `ScanSummary`: totals (`images`, `written`, `people`, `skipped` and `failed` by reason, `truncated`)
@@ -167,7 +167,7 @@ Diversity, clusters and coverage of one set.
 
 ```bash
 curl -s -X POST -H 'content-type: application/json' \
-  -d '{"path": "lora-outputs/run-12"}' http://<PUPPET_HOST>:8110/stats
+  -d '{"path": "lora-outputs/run-12"}' http://<PUPPET_HOST>:8220/stats
 ```
 
 The answer is a `PoseSetStats`: `count`, `usable`, `comparable_pairs` and `comparable_share` (how many usable pairs
@@ -194,7 +194,7 @@ An output set's poses against a reference (training) set: for each output, the n
 ```bash
 curl -s -X POST -H 'content-type: application/json' \
   -d '{"outputs": {"path": "lora-outputs/run-12"}, "reference": {"path": "training/concept-a"}}' \
-  http://<PUPPET_HOST>:8110/compare
+  http://<PUPPET_HOST>:8220/compare
 ```
 
 The answer is a `PoseSetComparison`: one `matches` entry per output (`nearest`, `distance`, `shared_joints`,
@@ -226,7 +226,7 @@ a list of people. `options` is a `RenderOptions`: `body`, `hands`, `face`, `widt
 ```bash
 jq -n --slurpfile p photo.pose.json '{pose: $p[0], options: {width: 1024, height: 1024, stroke_scale: "auto"}}' |
   curl -s -X POST -H 'content-type: application/json' --data-binary @- \
-    -o photo.openpose.png http://<PUPPET_HOST>:8110/render
+    -o photo.openpose.png http://<PUPPET_HOST>:8220/render
 ```
 
 | Status | When |

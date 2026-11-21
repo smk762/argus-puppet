@@ -1,4 +1,4 @@
-"""argus-puppet — Body pose for the Argus suite: whole-body keypoints, pose embeddings, diversity and coverage metrics, and ControlNet pose conditioning (:8110)"""
+"""argus-puppet — Body pose for the Argus suite: whole-body keypoints, pose embeddings, diversity and coverage metrics, and ControlNet pose conditioning (:8220)"""
 
 from __future__ import annotations
 
