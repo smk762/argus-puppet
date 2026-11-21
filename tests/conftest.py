@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import io
 import os
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -108,6 +109,83 @@ class RecordingCoordinator:
 
     def alease(self, **kwargs: Any):  # pragma: no cover - puppet leases from threads only
         raise NotImplementedError
+
+
+@dataclass
+class AsgiReply:
+    status: int
+    body: bytes
+    consumed: int  # request-body bytes the app pulled through receive()
+
+
+def asgi_request(
+    app: Any,
+    path: str,
+    chunks: Iterable[bytes | float],
+    *,
+    headers: dict[str, str] | None = None,
+    method: str = "POST",
+) -> AsgiReply:
+    """Drive an ASGI *app* directly, streaming *chunks* (a float entry sleeps that long first) as the body.
+
+    TestClient reads a whole request body before calling the app, so it cannot show how much of an over-cap body
+    the server pulls; this can. With no ``content-length`` header the body arrives as a chunked upload would."""
+    it = iter(chunks)
+    consumed = 0
+    pending: bytes | None = None
+    done = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal consumed, pending, done
+        if done:
+            await asyncio.sleep(3600)  # nothing more: the client is waiting for the answer
+        while True:
+            item = next(it, None)
+            if isinstance(item, float):
+                await asyncio.sleep(item)
+                continue
+            break
+        if item is None:
+            done = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        consumed += len(item)
+        return {"type": "http.request", "body": item, "more_body": True}
+
+    status = 0
+    body = bytearray()
+
+    async def send(message: dict[str, Any]) -> None:
+        nonlocal status
+        if message["type"] == "http.response.start":
+            status = message["status"]
+        elif message["type"] == "http.response.body":
+            body.extend(message.get("body", b""))
+
+    raw_path, _, query = path.partition("?")
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": raw_path,
+        "raw_path": raw_path.encode(),
+        "query_string": query.encode(),
+        "root_path": "",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 80),
+    }
+    asyncio.run(app(scope, receive, send))
+    return AsgiReply(status, bytes(body), consumed)
+
+
+def megabytes(n: int, head: bytes = b"", tail: bytes = b"") -> Iterator[bytes]:
+    """*head*, then *n* MB of zero bytes in 1 MB chunks, then *tail*."""
+    yield head
+    for _ in range(n):
+        yield b"\0" * (1024 * 1024)
+    yield tail
 
 
 @pytest.fixture

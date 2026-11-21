@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from conftest import FakeEstimator, RecordingCoordinator, draw_image
+from conftest import FakeEstimator, RecordingCoordinator, asgi_request, draw_image, megabytes
 from fastapi.testclient import TestClient
 
 from argus_puppet import registry, runtime
@@ -86,6 +86,24 @@ def test_pose_errors_map_to_status_codes(settings, fake) -> None:
     tiny_pixels = dataclasses.replace(settings, max_pixels=64 * 64)
     assert _post(TestClient(create_app(tiny_pixels, estimator=fake)), draw_image(100, 100)).status_code == 413
     assert fake.calls == 0
+
+
+MB = 1024 * 1024
+FORM_HEAD = b'--B\r\nContent-Disposition: form-data; name="file"; filename="a.png"\r\nContent-Type: image/png\r\n\r\n'
+FORM_TAIL = b"\r\n--B--\r\n"
+MULTIPART = {"content-type": "multipart/form-data; boundary=B"}
+
+
+def test_a_chunked_multipart_past_the_cap_is_refused_before_it_is_read_to_the_end(settings, fake) -> None:
+    """No Content-Length: the stream is counted against the cap plus the multipart overhead, not spooled whole."""
+    app = create_app(dataclasses.replace(settings, max_upload_bytes=MB), estimator=fake)
+    reply = asgi_request(app, "/pose", megabytes(32, FORM_HEAD, FORM_TAIL), headers=MULTIPART)
+    assert reply.status == 413, reply.body
+    assert reply.consumed <= 2 * MB + len(FORM_HEAD), f"the server read {reply.consumed // MB} MB past a 1 MB cap"
+    assert fake.calls == 0
+    ok = asgi_request(app, "/pose", [FORM_HEAD, draw_image(), FORM_TAIL], headers=MULTIPART)
+    assert ok.status == 200, ok.body  # chunked and under the cap: posed, named by the part's filename
+    assert PoseResult.model_validate_json(ok.body).image == "a.png"
 
 
 def test_a_missing_model_is_503_with_the_hint(settings) -> None:

@@ -68,8 +68,8 @@ from argus_puppet.models import (
 )
 
 READ_ONLY_REFUSAL = "argus-puppet is read-only (ARGUS_PUPPET_READ_ONLY): state-changing requests are refused"
-# A multipart body's Content-Length counts boundaries and part headers too: the declared-length pre-check allows this
-# much over the cap, and read_upload then holds the file itself to the exact cap.
+# A multipart body counts boundaries and part headers too: the whole body (declared or chunked) may be this much over
+# the cap, and read_upload then holds the file itself to the exact cap.
 MULTIPART_OVERHEAD = 64 * 1024
 RAW_TYPES = ("application/octet-stream", "image/")
 BUSY_RETRY_S = 1
@@ -159,18 +159,31 @@ def model_errors(exc: Exception) -> HTTPException:
     raise exc
 
 
+def _replayed(request: Request, body: bytes) -> Request:
+    """A copy of *request* whose body is *body*, already read (so its form parses from memory)."""
+    sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request(request.scope, receive=receive)
+
+
 async def read_image(request: Request, cap: int) -> tuple[bytes, str | None]:
     """The image of a ``POST``: raw bytes or the first file of a multipart form, at most *cap* bytes. Returns the
     bytes and the multipart filename, if any. 413 over the cap, 400 malformed, 415 an unsupported content type."""
     content_type = (request.headers.get("content-type") or "").lower()
     try:
         if content_type.startswith("multipart/form-data"):
-            declared = (request.headers.get("content-length") or "").strip()
-            if declared and not (declared.isascii() and declared.isdigit()):
-                raise BadInput("Content-Length is not a number")
-            if declared and int(declared) > cap + MULTIPART_OVERHEAD:
-                raise TooLarge("image", cap)
-            async with request.form() as form:
+            # The whole body, declared or chunked, is read through read_body against the cap plus the multipart
+            # overhead (an over-cap stream stops there), then parsed from memory; read_upload holds the file to
+            # the exact cap.
+            raw = await read_body(request, cap + MULTIPART_OVERHEAD, what="image")
+            async with _replayed(request, raw).form() as form:
                 upload = next((v for v in form.values() if hasattr(v, "read")), None)
                 if upload is None:
                     raise HTTPException(400, "no image file in the form")
