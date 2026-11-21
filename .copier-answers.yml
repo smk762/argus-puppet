@@ -13,10 +13,10 @@ has_cli: true
 has_server: true
 image_name: argus-puppet
 package_name: argus_puppet
-post_test: ''
+post_test: uv run --no-sync argus-puppet schema --check
 project_name: argus-puppet
 python_min: '3.11'
 ruff_pin: 0.15.16
-test_extras: dev
+test_extras: dev,server,cli,cpu
 version_build_arg: false
 

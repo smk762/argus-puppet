@@ -1,0 +1,994 @@
+{
+  "$defs": {
+    "Coverage": {
+      "description": "How many usable poses carry each label. Producers list every label of each kind, zero or not.",
+      "properties": {
+        "arms": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Count per arms label.",
+          "propertyNames": {
+            "enum": [
+              "up",
+              "out",
+              "down",
+              "mixed",
+              "unknown"
+            ]
+          },
+          "title": "Arms",
+          "type": "object"
+        },
+        "facing": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Count per facing label.",
+          "propertyNames": {
+            "enum": [
+              "front",
+              "back",
+              "left",
+              "right",
+              "unknown"
+            ]
+          },
+          "title": "Facing",
+          "type": "object"
+        },
+        "stance": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Count per stance label.",
+          "propertyNames": {
+            "enum": [
+              "standing",
+              "jumping",
+              "crouching",
+              "seated",
+              "lying",
+              "unknown"
+            ]
+          },
+          "title": "Stance",
+          "type": "object"
+        }
+      },
+      "title": "Coverage",
+      "type": "object"
+    },
+    "EstimatorProvenance": {
+      "description": "What produced a set of keypoints: the detector and pose model, where they ran, and the detection settings.",
+      "properties": {
+        "det_threshold": {
+          "description": "Minimum detector score for a person box to be kept.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Det Threshold",
+          "type": "number"
+        },
+        "detector": {
+          "$ref": "#/$defs/ModelRef",
+          "description": "The person detector."
+        },
+        "layout": {
+          "const": "coco_wholebody_133",
+          "default": "coco_wholebody_133",
+          "description": "Keypoint layout of the output.",
+          "title": "Layout",
+          "type": "string"
+        },
+        "name": {
+          "description": "The estimator pipeline, e.g. 'topdown' (a person detector, then a pose model).",
+          "title": "Name",
+          "type": "string"
+        },
+        "nms_iou": {
+          "description": "IoU above which overlapping person boxes are suppressed.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Nms Iou",
+          "type": "number"
+        },
+        "package_version": {
+          "description": "argus-puppet version that ran the estimator.",
+          "title": "Package Version",
+          "type": "string"
+        },
+        "pose": {
+          "$ref": "#/$defs/ModelRef",
+          "description": "The pose model."
+        },
+        "provider": {
+          "description": "ONNX Runtime execution provider used, e.g. 'CPUExecutionProvider'.",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "detector",
+        "pose",
+        "provider",
+        "package_version",
+        "det_threshold",
+        "nms_iou"
+      ],
+      "title": "EstimatorProvenance",
+      "type": "object"
+    },
+    "Health": {
+      "description": "``GET /health``.",
+      "properties": {
+        "device": {
+          "default": "cpu",
+          "description": "'cpu' or 'cuda'.",
+          "title": "Device",
+          "type": "string"
+        },
+        "free_vram_mb": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Free GPU memory, when on CUDA and measurable.",
+          "title": "Free Vram Mb"
+        },
+        "models": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "description": "Registry name -> whether its verified file is present.",
+          "title": "Models",
+          "type": "object"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ONNX Runtime provider in use, once a model is loaded.",
+          "title": "Provider"
+        },
+        "puppet_version": {
+          "default": "1.0",
+          "title": "Puppet Version",
+          "type": "string"
+        },
+        "read_only": {
+          "description": "Whether state-changing routes are refused.",
+          "title": "Read Only",
+          "type": "boolean"
+        },
+        "version": {
+          "description": "argus-puppet package version.",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "read_only"
+      ],
+      "title": "Health",
+      "type": "object"
+    },
+    "MetricParams": {
+      "description": "The thresholds a set's metrics were computed with.",
+      "properties": {
+        "cluster_threshold": {
+          "description": "Pose distance below which two poses join the same cluster.",
+          "minimum": 0.0,
+          "title": "Cluster Threshold",
+          "type": "number"
+        },
+        "min_joint_score": {
+          "description": "A joint counts as confident at or above this score.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Joint Score",
+          "type": "number"
+        },
+        "min_usable_joints": {
+          "description": "Confident body joints a primary person needs for the image to be usable.",
+          "minimum": 1,
+          "title": "Min Usable Joints",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "min_joint_score",
+        "min_usable_joints",
+        "cluster_threshold"
+      ],
+      "title": "MetricParams",
+      "type": "object"
+    },
+    "ModelRef": {
+      "description": "One pinned model file, as a result records it.",
+      "properties": {
+        "bytes": {
+          "description": "Size of the model file in bytes.",
+          "minimum": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "license": {
+          "description": "SPDX licence of the weights, e.g. 'Apache-2.0'.",
+          "title": "License",
+          "type": "string"
+        },
+        "name": {
+          "description": "Registry name, e.g. 'dwpose-l-384x288' or 'yolox_m'.",
+          "title": "Name",
+          "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 of the model file that ran (lower-case hex).",
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "sha256",
+        "license",
+        "bytes"
+      ],
+      "title": "ModelRef",
+      "type": "object"
+    },
+    "PartScores": {
+      "description": "Mean keypoint score of each part of one person (keys match ``skeleton.PARTS``).",
+      "properties": {
+        "body": {
+          "description": "Mean score of the 17 body joints (0-16).",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Body",
+          "type": "number"
+        },
+        "face": {
+          "description": "Mean score of the 68 face landmarks (23-90).",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Face",
+          "type": "number"
+        },
+        "feet": {
+          "description": "Mean score of the 6 foot points (17-22).",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Feet",
+          "type": "number"
+        },
+        "left_hand": {
+          "description": "Mean score of the 21 left-hand points (91-111).",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Left Hand",
+          "type": "number"
+        },
+        "right_hand": {
+          "description": "Mean score of the 21 right-hand points (112-132).",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Right Hand",
+          "type": "number"
+        }
+      },
+      "required": [
+        "body",
+        "feet",
+        "face",
+        "left_hand",
+        "right_hand"
+      ],
+      "title": "PartScores",
+      "type": "object"
+    },
+    "PersonPose": {
+      "description": "One detected person and their whole-body keypoints.",
+      "properties": {
+        "bbox": {
+          "description": "[x, y, w, h] in pixels: the top-left corner, then width and height.",
+          "maxItems": 4,
+          "minItems": 4,
+          "prefixItems": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "title": "Bbox",
+          "type": "array"
+        },
+        "det_score": {
+          "description": "The detector's score for this person's box.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Det Score",
+          "type": "number"
+        },
+        "keypoints": {
+          "description": "Exactly 133 COCO-WholeBody keypoints, each (x, y, score): pixel coordinates and a score in [0, 1]. A point the estimator could not place has score 0.",
+          "items": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "maxItems": 133,
+          "minItems": 133,
+          "title": "Keypoints",
+          "type": "array"
+        },
+        "part_scores": {
+          "$ref": "#/$defs/PartScores",
+          "description": "Mean keypoint score per part."
+        },
+        "primary": {
+          "default": false,
+          "description": "Whether this is the image's primary subject (PoseResult.primary).",
+          "title": "Primary",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bbox",
+        "det_score",
+        "keypoints",
+        "part_scores"
+      ],
+      "title": "PersonPose",
+      "type": "object"
+    },
+    "PoseCluster": {
+      "description": "A group of similar poses.",
+      "properties": {
+        "id": {
+          "description": "Cluster id, 0 for the largest.",
+          "minimum": 0,
+          "title": "Id",
+          "type": "integer"
+        },
+        "medoid": {
+          "description": "The image whose pose is most central to the cluster.",
+          "title": "Medoid",
+          "type": "string"
+        },
+        "share": {
+          "description": "size / the set's usable count.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Share",
+          "type": "number"
+        },
+        "size": {
+          "description": "Number of usable poses in it.",
+          "minimum": 1,
+          "title": "Size",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "size",
+        "share",
+        "medoid"
+      ],
+      "title": "PoseCluster",
+      "type": "object"
+    },
+    "PoseLabels": {
+      "description": "Coarse labels derived from keypoints (geometry rules, not a classifier). 'unknown' when the joints a rule\nneeds are not confident enough. Facing is the subject's, as seen by the camera: 'left' means they face the\nimage's left.",
+      "properties": {
+        "arms": {
+          "default": "unknown",
+          "enum": [
+            "up",
+            "out",
+            "down",
+            "mixed",
+            "unknown"
+          ],
+          "title": "Arms",
+          "type": "string"
+        },
+        "facing": {
+          "default": "unknown",
+          "enum": [
+            "front",
+            "back",
+            "left",
+            "right",
+            "unknown"
+          ],
+          "title": "Facing",
+          "type": "string"
+        },
+        "stance": {
+          "default": "unknown",
+          "enum": [
+            "standing",
+            "jumping",
+            "crouching",
+            "seated",
+            "lying",
+            "unknown"
+          ],
+          "title": "Stance",
+          "type": "string"
+        }
+      },
+      "title": "PoseLabels",
+      "type": "object"
+    },
+    "PoseLibrary": {
+      "description": "A set of poses to sample from for pose-conditioned generation.",
+      "properties": {
+        "created_from": {
+          "default": "",
+          "description": "Where the poses came from, e.g. 'CC0 photos of adults, folder poses/'.",
+          "title": "Created From",
+          "type": "string"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/PoseLibraryEntry"
+          },
+          "title": "Entries",
+          "type": "array"
+        },
+        "estimator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EstimatorProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The estimator that extracted the poses."
+        },
+        "layout": {
+          "const": "coco_wholebody_133",
+          "default": "coco_wholebody_133",
+          "title": "Layout",
+          "type": "string"
+        },
+        "puppet_version": {
+          "default": "1.0",
+          "title": "Puppet Version",
+          "type": "string"
+        }
+      },
+      "title": "PoseLibrary",
+      "type": "object"
+    },
+    "PoseLibraryEntry": {
+      "description": "One pose in a library: its keypoints and where they came from.",
+      "properties": {
+        "cluster": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cluster id within the library, if clustered.",
+          "title": "Cluster"
+        },
+        "height": {
+          "description": "Source height in pixels.",
+          "minimum": 1,
+          "title": "Height",
+          "type": "integer"
+        },
+        "id": {
+          "description": "Unique within the library.",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "keypoints": {
+          "description": "Exactly 133 COCO-WholeBody keypoints, each (x, y, score): pixel coordinates and a score in [0, 1]. A point the estimator could not place has score 0.",
+          "items": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "type": "array"
+          },
+          "maxItems": 133,
+          "minItems": 133,
+          "title": "Keypoints",
+          "type": "array"
+        },
+        "labels": {
+          "$ref": "#/$defs/PoseLabels"
+        },
+        "source_image": {
+          "description": "The image the pose was extracted from, relative to its root.",
+          "title": "Source Image",
+          "type": "string"
+        },
+        "source_sha256": {
+          "description": "SHA-256 of the source image.",
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "width": {
+          "description": "Source width in pixels; the keypoints' coordinate frame.",
+          "minimum": 1,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "source_image",
+        "source_sha256",
+        "width",
+        "height",
+        "keypoints"
+      ],
+      "title": "PoseLibraryEntry",
+      "type": "object"
+    },
+    "PoseMatch": {
+      "description": "An output image's nearest reference pose.",
+      "properties": {
+        "distance": {
+          "description": "Pose distance between the two.",
+          "minimum": 0.0,
+          "title": "Distance",
+          "type": "number"
+        },
+        "image": {
+          "description": "The output image.",
+          "title": "Image",
+          "type": "string"
+        },
+        "memorised": {
+          "description": "Whether distance is below the comparison's threshold.",
+          "title": "Memorised",
+          "type": "boolean"
+        },
+        "nearest": {
+          "description": "The reference image with the closest pose.",
+          "title": "Nearest",
+          "type": "string"
+        }
+      },
+      "required": [
+        "image",
+        "nearest",
+        "distance",
+        "memorised"
+      ],
+      "title": "PoseMatch",
+      "type": "object"
+    },
+    "PoseResult": {
+      "description": "One image's poses: the sidecar ``<stem>.pose.json`` and the body of ``POST /pose``.",
+      "properties": {
+        "estimator": {
+          "$ref": "#/$defs/EstimatorProvenance"
+        },
+        "height": {
+          "description": "Image height in pixels, after EXIF orientation.",
+          "minimum": 1,
+          "title": "Height",
+          "type": "integer"
+        },
+        "image": {
+          "description": "Path relative to the scanned root ('/' separators), or the upload's name.",
+          "title": "Image",
+          "type": "string"
+        },
+        "image_sha256": {
+          "description": "SHA-256 of the image file's bytes.",
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Image Sha256",
+          "type": "string"
+        },
+        "layout": {
+          "const": "coco_wholebody_133",
+          "default": "coco_wholebody_133",
+          "description": "Keypoint layout of every person.",
+          "title": "Layout",
+          "type": "string"
+        },
+        "people": {
+          "description": "Every person found, largest first.",
+          "items": {
+            "$ref": "#/$defs/PersonPose"
+          },
+          "title": "People",
+          "type": "array"
+        },
+        "primary": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Index into people of the primary subject; null when there is nobody.",
+          "title": "Primary"
+        },
+        "puppet_version": {
+          "default": "1.0",
+          "title": "Puppet Version",
+          "type": "string"
+        },
+        "width": {
+          "description": "Image width in pixels, after EXIF orientation.",
+          "minimum": 1,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "image",
+        "image_sha256",
+        "width",
+        "height",
+        "estimator"
+      ],
+      "title": "PoseResult",
+      "type": "object"
+    },
+    "PoseSetComparison": {
+      "description": "An output set's poses against a reference (training) set: copied poses and coverage drift.",
+      "properties": {
+        "coverage_divergence": {
+          "description": "Jensen-Shannon divergence (base 2) between the output and reference coverage histograms, averaged over stance, arms and facing: 0 = same mix of poses, 1 = disjoint.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Coverage Divergence",
+          "type": "number"
+        },
+        "estimator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EstimatorProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "matches": {
+          "description": "One per usable output image.",
+          "items": {
+            "$ref": "#/$defs/PoseMatch"
+          },
+          "title": "Matches",
+          "type": "array"
+        },
+        "memorised_share": {
+          "description": "Share of matches flagged memorised.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Memorised Share",
+          "type": "number"
+        },
+        "output_count": {
+          "description": "Usable output poses compared.",
+          "minimum": 0,
+          "title": "Output Count",
+          "type": "integer"
+        },
+        "output_coverage": {
+          "$ref": "#/$defs/Coverage"
+        },
+        "params": {
+          "$ref": "#/$defs/MetricParams"
+        },
+        "puppet_version": {
+          "default": "1.0",
+          "title": "Puppet Version",
+          "type": "string"
+        },
+        "reference_count": {
+          "description": "Usable reference poses compared against.",
+          "minimum": 0,
+          "title": "Reference Count",
+          "type": "integer"
+        },
+        "reference_coverage": {
+          "$ref": "#/$defs/Coverage"
+        },
+        "threshold": {
+          "description": "Pose distance below which an output counts as memorised.",
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        }
+      },
+      "required": [
+        "output_count",
+        "reference_count",
+        "memorised_share",
+        "threshold",
+        "coverage_divergence",
+        "params"
+      ],
+      "title": "PoseSetComparison",
+      "type": "object"
+    },
+    "PoseSetItem": {
+      "description": "One image of a set, as the set metrics saw it.",
+      "properties": {
+        "cluster": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The PoseCluster.id it fell in; null when not usable.",
+          "title": "Cluster"
+        },
+        "image": {
+          "description": "The image, named as in its PoseResult.",
+          "title": "Image",
+          "type": "string"
+        },
+        "labels": {
+          "$ref": "#/$defs/PoseLabels"
+        },
+        "usable": {
+          "description": "Whether it had a primary person with enough confident joints to embed (see params).",
+          "title": "Usable",
+          "type": "boolean"
+        },
+        "xy": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "2-D projection of its pose vector for a scatter plot; null when not usable.",
+          "title": "Xy"
+        }
+      },
+      "required": [
+        "image",
+        "usable"
+      ],
+      "title": "PoseSetItem",
+      "type": "object"
+    },
+    "PoseSetStats": {
+      "description": "Pose diversity and coverage of one image set (argus-proof's pose-diversity gate reads ``diversity``).",
+      "properties": {
+        "cluster_count": {
+          "minimum": 0,
+          "title": "Cluster Count",
+          "type": "integer"
+        },
+        "clusters": {
+          "description": "Largest first.",
+          "items": {
+            "$ref": "#/$defs/PoseCluster"
+          },
+          "title": "Clusters",
+          "type": "array"
+        },
+        "count": {
+          "description": "Images in the set.",
+          "minimum": 0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "coverage": {
+          "$ref": "#/$defs/Coverage"
+        },
+        "diversity": {
+          "description": "How varied the usable poses are, 0 (all one pose) to 1 (highly varied); 0 under 2 usable.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Diversity",
+          "type": "number"
+        },
+        "estimator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EstimatorProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The estimator, when the stats extracted poses."
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/PoseSetItem"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "largest_cluster_share": {
+          "description": "Share of usable poses in the largest cluster; 0 if none.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Largest Cluster Share",
+          "type": "number"
+        },
+        "mean_pairwise_distance": {
+          "description": "Mean pose distance over all usable pairs; 0 under 2 usable.",
+          "minimum": 0.0,
+          "title": "Mean Pairwise Distance",
+          "type": "number"
+        },
+        "params": {
+          "$ref": "#/$defs/MetricParams"
+        },
+        "puppet_version": {
+          "default": "1.0",
+          "title": "Puppet Version",
+          "type": "string"
+        },
+        "usable": {
+          "description": "Images with a usable primary pose.",
+          "minimum": 0,
+          "title": "Usable",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count",
+        "usable",
+        "diversity",
+        "mean_pairwise_distance",
+        "cluster_count",
+        "largest_cluster_share",
+        "params"
+      ],
+      "title": "PoseSetStats",
+      "type": "object"
+    },
+    "RenderOptions": {
+      "description": "How to draw an OpenPose-convention skeleton control image.",
+      "properties": {
+        "body": {
+          "default": true,
+          "description": "Draw the 18-joint body.",
+          "title": "Body",
+          "type": "boolean"
+        },
+        "face": {
+          "default": true,
+          "description": "Draw the face landmarks.",
+          "title": "Face",
+          "type": "boolean"
+        },
+        "hands": {
+          "default": true,
+          "description": "Draw both hands.",
+          "title": "Hands",
+          "type": "boolean"
+        },
+        "height": {
+          "anyOf": [
+            {
+              "maximum": 8192,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Output height; default the source image's.",
+          "title": "Height"
+        },
+        "min_score": {
+          "default": 0.3,
+          "description": "Points below this score are not drawn.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Score",
+          "type": "number"
+        },
+        "width": {
+          "anyOf": [
+            {
+              "maximum": 8192,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Output width; default the source image's.",
+          "title": "Width"
+        }
+      },
+      "title": "RenderOptions",
+      "type": "object"
+    }
+  },
+  "title": "argus-puppet wire contract"
+}

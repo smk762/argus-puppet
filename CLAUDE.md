@@ -31,20 +31,38 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | A new suite-rule violation (argus-ci's lint catalogue) | CI `suite-rules` job; `.suite-rules-baseline.json` may only shrink |
 | A CLAUDE.md without the argus-suite block | CI `suite` job (argus-ci suite-check) |
 | A state-changing route without the read-only and origin guards, or a caller-supplied path outside a configured root | **UNENFORCED**: add a test that walks the app's routes |
+| A non-permissive estimator weight or an unpinned model file | `tests/test_must_never.py::test_every_model_is_permissive_and_pinned` (licence allow-list Apache-2.0/MIT/BSD; 64-hex sha256 for the file and any archive) |
+| A tracked image, video or model file, or an image hidden in a base64 literal | `tests/test_must_never.py` (`git ls-files` media/model suffixes; base64 runs decoded for image magic) |
+| A wire schema that drifts from `models.py` | CI `post-test`: `argus-puppet schema --check`; `tests/test_cli.py` |
 
 ## Layout
 
-`src/argus_puppet/` — the package. Key modules (fill in as they land):
+`src/argus_puppet/` — the package. Key modules:
 
 - `__init__.py` — version shim (`__version__` from `hatch-vcs`).
-- `cli.py` — Typer app; entry point `argus-puppet` (`[project.scripts]`).
-- `server/` — FastAPI app (`server.app:app`); optional `[server]` extra. Reuse argus-cortex's write-guard / env-flag helpers for any state-changing route.
-- `models.py` — if this package has a wire contract, keep the Pydantic types here and treat them as the API surface.
+- `skeleton.py` — the COCO-WholeBody 133 layout as data: names, part slices (`BODY`, `FEET`, `FACE`, `LEFT_HAND`,
+  `RIGHT_HAND`, `PARTS`), `Joint` indices, limbs, `FLIP_PAIRS`/`FLIP_PERMUTATION`/`flip_horizontal`, and the OpenPose-18
+  convention (`to_openpose18`, limbs, colours, hand edges). Pure numpy, no I/O. Index keypoints through it, never by
+  bare numbers elsewhere.
+- `models.py` — the Pydantic v2 wire contract (`puppet_version`, `PUPPET_VERSION`). Only top-level payloads
+  (`PoseResult`, `PoseSetStats`, `PoseSetComparison`, `PoseLibrary`, `Health`) subclass the versioned base. Add a field:
+  bump the minor and note it in the version comment; rename or remove one: a new major. Then `make schema` and commit
+  `schema/puppet-wire.schema.json`. Sidecars are `<stem>.pose.json` (`SIDECAR_SUFFIX`, `sidecar_path`).
+- `registry.py` — the pinned model table (`PinnedModel`, `MODELS`, `DEFAULT_*`/`LIGHT_*`, `model_ref`). Data only; a new
+  model needs a permissive licence and its sha256, or `tests/test_must_never.py` fails.
+- `config.py` — `Settings.from_env()` (`ARGUS_PUPPET_*`), `ConfigError`, and `DEFAULT_PORT` (the only code constant for the port;
+  it may change).
+- `cli.py` — Typer app; entry point `argus-puppet` (`[project.scripts]`). One app: add commands with `@app.command()`;
+  run `make docs` after.
+- `server/` — FastAPI app (`server.app:app`); optional `[server]` extra (not yet written). Reuse argus-cortex's
+  write-guard / env-flag helpers for any state-changing route, and fence caller paths under `Settings.data_root`.
+- `gpu-tenant.yaml` (repo root) — the argus-iris tenant manifest (kind `pose`); `tests/test_gpu_tenant.py` validates it.
 
 ## Commands
 
 ```bash
-make install   # uv venv + editable install with the "dev" extras
+make install   # uv venv + editable install with the dev,server,cli,cpu extras
+make schema    # regenerate schema/puppet-wire.schema.json (CI checks it)
 make test      # pytest --tb=short -q
 make lint      # ruff check + format --check (pinned ruff 0.15.16)
 make format    # ruff format + --fix
