@@ -26,6 +26,9 @@ DEFAULT_MAX_SET_RESULTS = 5000
 # Largest JSON body POST /stats, /compare and /render read. A one-person result is ~5-10 KB of JSON, so two sets of
 # 5000 fit with room to spare.
 DEFAULT_MAX_JSON_BYTES = 128 * 1024 * 1024
+# Seconds a request body may take to arrive (every POST); past it the call is answered 408 and its admission slot
+# freed. 60 s carries a full 50 MiB upload at about 1 MB/s.
+DEFAULT_BODY_TIMEOUT_S = 60.0
 DEVICES: tuple[str, ...] = ("auto", "cpu", "cuda")
 
 Device = Literal["auto", "cpu", "cuda"]
@@ -89,6 +92,7 @@ class Settings:
     pose_concurrency: int = DEFAULT_POSE_CONCURRENCY
     max_set_results: int = DEFAULT_MAX_SET_RESULTS
     max_json_bytes: int = DEFAULT_MAX_JSON_BYTES
+    body_timeout_s: float = DEFAULT_BODY_TIMEOUT_S
     # argus-curator's base URL for the age fail-safe (POST /faces?body=true). Empty: the age check cannot run, and
     # nothing is ever sent anywhere. Only ever this configured URL, never one a caller supplies.
     age_url: str = ""
@@ -125,6 +129,8 @@ class Settings:
             raise ConfigError(f"ARGUS_PUPPET_MAX_SET_RESULTS {self.max_set_results}: must be at least 1")
         if self.max_json_bytes < 1024:
             raise ConfigError(f"ARGUS_PUPPET_MAX_JSON_BYTES {self.max_json_bytes}: must be at least 1024")
+        if not 0.0 < self.body_timeout_s <= 3600.0:
+            raise ConfigError(f"ARGUS_PUPPET_BODY_TIMEOUT_S {self.body_timeout_s}: must be above 0 and at most 3600")
         if self.age_url and not self.age_url.lower().startswith(("http://", "https://")):
             raise ConfigError(f"ARGUS_PUPPET_AGE_URL {self.age_url!r}: must be an http(s) URL")
 
@@ -162,5 +168,6 @@ class Settings:
             pose_concurrency=_int("POSE_CONCURRENCY", DEFAULT_POSE_CONCURRENCY),  # type: ignore[arg-type]
             max_set_results=_int("MAX_SET_RESULTS", DEFAULT_MAX_SET_RESULTS),  # type: ignore[arg-type]
             max_json_bytes=_int("MAX_JSON_BYTES", DEFAULT_MAX_JSON_BYTES),  # type: ignore[arg-type]
+            body_timeout_s=_float("BODY_TIMEOUT_S", DEFAULT_BODY_TIMEOUT_S),
             age_url=_env("AGE_URL"),
         )

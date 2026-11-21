@@ -25,6 +25,7 @@ def test_defaults() -> None:
     assert s.device == "auto" and s.gpu_mem_limit_mb is None
     assert s.data_root is None and s.read_only is False
     assert s.cors_origins == () and s.trusted_hosts == ()
+    assert s.body_timeout_s == 60.0
     assert s.model_path("yolox_m") == s.model_dir / "yolox_m.onnx"
 
 
@@ -42,6 +43,7 @@ def test_parses_every_setting(monkeypatch, tmp_path) -> None:
         "TRUSTED_HOSTS": "Morpheus, ,box",
         "MAX_UPLOAD_BYTES": "1048576",
         "MAX_PIXELS": "1000000",
+        "BODY_TIMEOUT_S": "12.5",
     }
     for k, v in env.items():
         monkeypatch.setenv(f"ARGUS_PUPPET_{k}", v)
@@ -54,6 +56,7 @@ def test_parses_every_setting(monkeypatch, tmp_path) -> None:
     assert s.cors_origins == ("http://a.example", "http://b.example")
     assert s.trusted_hosts == ("morpheus", "box")
     assert (s.max_upload_bytes, s.max_pixels) == (1048576, 1000000)
+    assert s.body_timeout_s == 12.5
 
 
 @pytest.mark.parametrize(
@@ -67,6 +70,8 @@ def test_parses_every_setting(monkeypatch, tmp_path) -> None:
         ("GPU_MEM_LIMIT_MB", "10", "at least 256"),
         ("MAX_UPLOAD_BYTES", "1", "at least 1024"),
         ("MAX_PIXELS", "-5", "at least"),
+        ("BODY_TIMEOUT_S", "0", "above 0"),
+        ("BODY_TIMEOUT_S", "soon", "not a number"),
     ],
 )
 def test_bad_values_raise_config_error(monkeypatch, key, value, match) -> None:

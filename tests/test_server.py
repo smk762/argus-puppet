@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,18 @@ def test_a_chunked_multipart_past_the_cap_is_refused_before_it_is_read_to_the_en
     ok = asgi_request(app, "/pose", [FORM_HEAD, draw_image(), FORM_TAIL], headers=MULTIPART)
     assert ok.status == 200, ok.body  # chunked and under the cap: posed, named by the part's filename
     assert PoseResult.model_validate_json(ok.body).image == "a.png"
+
+
+@pytest.mark.parametrize("content_type", ["image/png", "multipart/form-data; boundary=B"])
+def test_a_stalled_upload_is_408_and_frees_its_slot(settings, fake, content_type) -> None:
+    """A body that stops arriving is cut off at ARGUS_PUPPET_BODY_TIMEOUT_S, not left holding an admission slot."""
+    app = create_app(dataclasses.replace(settings, body_timeout_s=0.2, pose_concurrency=1), estimator=fake)
+    started = time.monotonic()
+    reply = asgi_request(app, "/pose", [b"0123456789", 30.0], headers={"content-type": content_type})
+    assert reply.status == 408 and b"ARGUS_PUPPET_BODY_TIMEOUT_S" in reply.body
+    assert time.monotonic() - started < 5
+    assert app.state.puppet.admit.in_flight == 0
+    assert _post(TestClient(app), draw_image()).status_code == 200  # the one slot is free again
 
 
 def test_a_missing_model_is_503_with_the_hint(settings) -> None:

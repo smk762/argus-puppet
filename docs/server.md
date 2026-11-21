@@ -83,6 +83,7 @@ per image, those with the highest detector scores; the rest are dropped, not ref
 |---|---|
 | 200 | Posed. An image with nobody in it is still 200, with `people: []` and `primary: null` |
 | 400 | The body is empty; the multipart form has no file; `face` is not four finite numbers with `w, h > 0`; `name` is not a plain file name; `X-Argus-Priority` is not a priority class; the image could not be decoded |
+| 408 | The body did not arrive within `ARGUS_PUPPET_BODY_TIMEOUT_S` (default 60 s) |
 | 413 | The image is larger than `ARGUS_PUPPET_MAX_UPLOAD_BYTES` (default 50 MiB) or `ARGUS_PUPPET_MAX_PIXELS` (default 40,000,000 pixels) |
 | 415 | The content type is neither raw nor multipart, or the bytes are not an image |
 | 503 | Busy (see [concurrency](#concurrency-and-503)), a model is missing or does not verify, ONNX Runtime is not installed, or the GPU lease was not granted |
@@ -239,11 +240,12 @@ jq -n --slurpfile p photo.pose.json '{pose: $p[0], options: {width: 1024, height
 
 ### Errors common to the JSON routes
 
-`/stats`, `/compare` and `/render` read their body themselves:
+`/stats`, `/compare` and `/render` read their body themselves (`/pose/scan` too, with its own 16 KiB cap):
 
 | Status | When |
 |---|---|
 | 400 | The body could not be read (for example a malformed `Content-Length`) |
+| 408 | The body did not arrive within `ARGUS_PUPPET_BODY_TIMEOUT_S` (default 60 s) |
 | 413 | The body is larger than `ARGUS_PUPPET_MAX_JSON_BYTES` (default 128 MiB), or a set is over the set cap |
 | 415 | `Content-Type` is present and is not `application/json` |
 | 422 | The body is not valid JSON for the route's model |
@@ -269,6 +271,11 @@ and the client should retry.
 | `POST /pose` | `ARGUS_PUPPET_POSE_CONCURRENCY` calls at once (default 2) |
 | `POST /stats`, `/compare`, `/render` | A separate pool of the same size, shared by the three |
 | `POST /pose/scan` | One scan at a time |
+
+A call holds its slot while its body arrives, so the body read has a deadline: `ARGUS_PUPPET_BODY_TIMEOUT_S`
+(default 60 s, enough for a 50 MiB upload at about 1 MB/s). A body still arriving past it is answered 408, the
+connection is closed and the slot is freed. A body is counted against its cap as it streams, whether or not it
+declares a `Content-Length`, so an oversized one is refused without being read to the end.
 
 Model inference and set metrics run in worker threads, so `GET /health` keeps answering while they work.
 
@@ -322,3 +329,4 @@ depend on:
 | `ARGUS_PUPPET_POSE_CONCURRENCY` | 2 | `/pose`; separately, `/stats` + `/compare` + `/render` |
 | `ARGUS_PUPPET_MAX_SET_RESULTS` | 5000 | each set of `/stats` and `/compare` |
 | `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | `/stats`, `/compare`, `/render` bodies |
+| `ARGUS_PUPPET_BODY_TIMEOUT_S` | 60 | every `POST` body (408 past it) |

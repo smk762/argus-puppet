@@ -21,7 +21,9 @@ fences its path (409 without a data root, 400 outside it, 404 missing). A set ho
 ``ARGUS_PUPPET_MAX_SET_RESULTS`` results (413 past it: the distance matrix is O(N^2)); a JSON body at most
 ``ARGUS_PUPPET_MAX_JSON_BYTES`` (413); a render canvas at most ``ARGUS_PUPPET_MAX_PIXELS`` pixels and
 ``ARGUS_PUPPET_MAX_PEOPLE`` people (413). The compute routes share one admission bound
-(``ARGUS_PUPPET_POSE_CONCURRENCY``; 503 + Retry-After past it).
+(``ARGUS_PUPPET_POSE_CONCURRENCY``; 503 + Retry-After past it). Every body is read through :func:`read_capped`:
+counted against its cap as it streams, declared length or not, and cut off at ``ARGUS_PUPPET_BODY_TIMEOUT_S`` (408),
+so a slow client cannot hold an admission slot.
 
 There is no auth: reaching the port is host access. Every unsafe method passes the origin
 :class:`~argus_cortex.server.WriteGuard` (another site's page is refused), then, in read-only mode, a second guard
@@ -175,28 +177,45 @@ def _replayed(request: Request, body: bytes) -> Request:
     return Request(request.scope, receive=receive)
 
 
-async def read_image(request: Request, cap: int) -> tuple[bytes, str | None]:
-    """The image of a ``POST``: raw bytes or the first file of a multipart form, at most *cap* bytes. Returns the
-    bytes and the multipart filename, if any. 413 over the cap, 400 malformed, 415 an unsupported content type."""
-    content_type = (request.headers.get("content-type") or "").lower()
+async def read_capped(request: Request, cap: int, *, timeout: float, what: str) -> bytes:
+    """The body of a ``POST``, at most *cap* bytes, arriving within *timeout* seconds: every route's body is read
+    through here. 413 over the cap (a declared length at once, a chunked body as it streams), 400 malformed, 408 when
+    it has not all arrived in time (the caller's admission slot is then freed, and the connection closed)."""
     try:
-        if content_type.startswith("multipart/form-data"):
-            # The whole body, declared or chunked, is read through read_body against the cap plus the multipart
-            # overhead (an over-cap stream stops there), then parsed from memory; read_upload holds the file to
-            # the exact cap.
-            raw = await read_body(request, cap + MULTIPART_OVERHEAD, what="image")
+        async with asyncio.timeout(timeout):
+            return await read_body(request, cap, what=what)
+    except TooLarge as exc:
+        raise HTTPException(413, str(exc)) from None
+    except BadInput as exc:
+        raise HTTPException(400, str(exc)) from None
+    except TimeoutError:
+        raise HTTPException(
+            408,
+            f"the {what} did not arrive within {timeout:g}s (ARGUS_PUPPET_BODY_TIMEOUT_S)",
+            headers={"Connection": "close"},
+        ) from None
+
+
+async def read_image(request: Request, cap: int, *, timeout: float) -> tuple[bytes, str | None]:
+    """The image of a ``POST``: raw bytes or the first file of a multipart form, at most *cap* bytes. Returns the
+    bytes and the multipart filename, if any. 413 over the cap, 400 malformed, 408 too slow, 415 an unsupported
+    content type."""
+    content_type = (request.headers.get("content-type") or "").lower()
+    if content_type.startswith("multipart/form-data"):
+        # The whole body, declared or chunked, is read against the cap plus the multipart overhead (an over-cap
+        # stream stops there), then parsed from memory; read_upload holds the file to the exact cap.
+        raw = await read_capped(request, cap + MULTIPART_OVERHEAD, timeout=timeout, what="image")
+        try:
             async with _replayed(request, raw).form() as form:
                 upload = next((v for v in form.values() if hasattr(v, "read")), None)
                 if upload is None:
                     raise HTTPException(400, "no image file in the form")
                 return await read_upload(upload, cap, what="image"), getattr(upload, "filename", None)
-        if content_type and not content_type.startswith(RAW_TYPES):
-            raise HTTPException(415, "send the image as raw bytes (application/octet-stream or image/*) or multipart")
-        return await read_body(request, cap, what="image"), None
-    except TooLarge as exc:
-        raise HTTPException(413, str(exc)) from None
-    except BadInput as exc:
-        raise HTTPException(400, str(exc)) from None
+        except TooLarge as exc:
+            raise HTTPException(413, str(exc)) from None
+    if content_type and not content_type.startswith(RAW_TYPES):
+        raise HTTPException(415, "send the image as raw bytes (application/octet-stream or image/*) or multipart")
+    return await read_capped(request, cap, timeout=timeout, what="image"), None
 
 
 def _name(raw: str | None, filename: str | None) -> str:
@@ -239,18 +258,14 @@ def health(state: AppState) -> Health:
 M = TypeVar("M", bound=BaseModel)
 
 
-async def read_json(request: Request, model: type[M], cap: int) -> M:
-    """The JSON body of a ``POST`` as *model*: at most *cap* bytes (413), JSON (415 otherwise), valid (422 with the
-    errors, never echoing the input). Validation runs off the event loop: a large set takes a while."""
+async def read_json(request: Request, model: type[M], cap: int, *, timeout: float) -> M:
+    """The JSON body of a ``POST`` as *model*: at most *cap* bytes (413), within *timeout* seconds (408), JSON (415
+    otherwise), valid (422 with the errors, never echoing the input). Validation runs off the event loop: a large set
+    takes a while."""
     content_type = (request.headers.get("content-type") or "").lower()
     if content_type and not content_type.startswith("application/json"):
         raise HTTPException(415, "send the request as application/json")
-    try:
-        body = await read_body(request, cap, what="request body")
-    except TooLarge as exc:
-        raise HTTPException(413, str(exc)) from None
-    except BadInput as exc:
-        raise HTTPException(400, str(exc)) from None
+    body = await read_capped(request, cap, timeout=timeout, what="request body")
     try:
         return await asyncio.to_thread(model.model_validate_json, body)
     except ValidationError as exc:
@@ -368,7 +383,7 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
         async with state.admit.slot():
-            data, filename = await read_image(request, settings.max_upload_bytes)
+            data, filename = await read_image(request, settings.max_upload_bytes, timeout=settings.body_timeout_s)
             if not data:
                 raise HTTPException(400, "no image: the body is empty")
             image_name = _name(name, filename)
@@ -397,7 +412,7 @@ def create_app(
         root = settings.data_root
         if root is None:  # before the body is read
             raise HTTPException(409, "no data root is configured (ARGUS_PUPPET_DATA_ROOT): scanning is off")
-        req = await read_json(request, ScanRequest, SCAN_JSON_BYTES)
+        req = await read_json(request, ScanRequest, SCAN_JSON_BYTES, timeout=settings.body_timeout_s)
         try:
             target = safe_join(root, req.path, allow_root=True, label="path")
         except PathRefused as exc:
@@ -428,7 +443,7 @@ def create_app(
         """Pose diversity, clusters and coverage of one set: ``StatsRequest`` (results, or a sidecar folder under the
         data root, and optional ``params``). Writes nothing."""
         async with state.compute_admit.slot():
-            req = await read_json(request, StatsRequest, cap)
+            req = await read_json(request, StatsRequest, cap, timeout=settings.body_timeout_s)
             results = await asyncio.to_thread(load_set, settings, req, "set")
             return await asyncio.to_thread(metrics.pose_set_stats, results, params=req.params)
 
@@ -436,7 +451,7 @@ def create_app(
     async def post_compare(request: Request) -> PoseSetComparison:
         """An output set's poses against a reference set: ``CompareRequest``. Writes nothing."""
         async with state.compute_admit.slot():
-            req = await read_json(request, CompareRequest, cap)
+            req = await read_json(request, CompareRequest, cap, timeout=settings.body_timeout_s)
             outputs = await asyncio.to_thread(load_set, settings, req.outputs, "outputs")
             reference = await asyncio.to_thread(load_set, settings, req.reference, "reference")
             threshold = compare.DEFAULT_CLOSE_THRESHOLD if req.threshold is None else req.threshold
@@ -448,7 +463,7 @@ def create_app(
     async def post_render(request: Request) -> Response:
         """An OpenPose-convention control PNG for one pose: ``RenderRequest``. Writes nothing."""
         async with state.compute_admit.slot():
-            req = await read_json(request, RenderRequest, cap)
+            req = await read_json(request, RenderRequest, cap, timeout=settings.body_timeout_s)
             check_render(settings, req)
             try:
                 png = await asyncio.to_thread(render_request, req)

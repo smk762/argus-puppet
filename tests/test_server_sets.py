@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from conftest import FakeEstimator
+from conftest import FakeEstimator, asgi_request
 from fastapi.testclient import TestClient
 from PIL import Image
 from posegen import PRESETS, make, result
@@ -193,6 +193,15 @@ def test_render_caps_pixels_and_people(settings) -> None:
     assert c.post("/render", json=src).status_code == 413
     crowd = {"pose": {"keypoints": [kp] * 3, "width": 50, "height": 50}}
     assert c.post("/render", json=crowd).status_code == 413
+
+
+@pytest.mark.parametrize("path", ["/stats", "/compare", "/render"])
+def test_a_stalled_json_body_is_408_and_frees_the_compute_slot(settings, path) -> None:
+    app = create_app(dataclasses.replace(settings, body_timeout_s=0.2, pose_concurrency=1), estimator=FakeEstimator())
+    reply = asgi_request(app, path, [b'{"results": [', 30.0], headers={"content-type": "application/json"})
+    assert reply.status == 408 and b"ARGUS_PUPPET_BODY_TIMEOUT_S" in reply.body
+    assert app.state.puppet.compute_admit.in_flight == 0
+    assert TestClient(app).post("/stats", json={"results": body(poses())}).status_code == 200
 
 
 def test_compute_runs_off_the_event_loop(settings, monkeypatch) -> None:
