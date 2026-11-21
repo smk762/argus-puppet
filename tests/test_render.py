@@ -1,0 +1,325 @@
+from __future__ import annotations
+
+import io
+import math
+
+import numpy as np
+import pytest
+from PIL import Image
+from synthetic_poses import figure, result
+
+from argus_puppet.models import RenderOptions
+from argus_puppet.render import (
+    FACE_COLOR,
+    HAND_DOT_COLOR,
+    HAND_EDGE_COLORS,
+    LIMB_DIM,
+    canvas_transform,
+    render_array,
+    render_png,
+    render_pose,
+)
+from argus_puppet.skeleton import FACE, FEET, LEFT_HAND, OPENPOSE_COLORS, OPENPOSE_LIMBS, RIGHT_HAND, to_openpose18
+
+BODY_ONLY = RenderOptions(hands=False, face=False)
+SIZE = (400, 800)
+
+
+def big() -> np.ndarray:
+    """The standing figure at 4x, in a 400 x 800 frame."""
+    return figure(scale=4)
+
+
+def dim(color: tuple[int, int, int]) -> tuple[int, int, int]:
+    return tuple(int(c * LIMB_DIM) for c in color)  # type: ignore[return-value]
+
+
+def px(img: np.ndarray, x: float, y: float) -> tuple[int, int, int]:
+    return tuple(int(v) for v in img[math.floor(y), math.floor(x)])  # type: ignore[return-value]
+
+
+def colours(img: np.ndarray) -> set[tuple[int, int, int]]:
+    return {tuple(int(v) for v in c) for c in np.unique(img.reshape(-1, 3), axis=0)}
+
+
+# ── the colour convention ────────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_hand_edge_colours_follow_the_hsv_wheel() -> None:
+    assert HAND_EDGE_COLORS[0] == (255, 0, 0)
+    assert HAND_EDGE_COLORS[5] == (128, 255, 0)  # 127.5 rounds half to even
+    assert HAND_EDGE_COLORS[10] == (0, 255, 255)
+    assert len(HAND_EDGE_COLORS) == 20 and len(set(HAND_EDGE_COLORS)) == 20
+
+
+# Limbs whose midpoint no other shape of the standing figure covers (the head limbs crowd each other).
+CLEAR_LIMBS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+
+
+@pytest.mark.parametrize("i", CLEAR_LIMBS)
+def test_limb_midpoint_is_its_colour_dimmed(i: int) -> None:
+    kp = big()
+    img = render_array(kp, BODY_ONLY, source_size=SIZE)
+    body = to_openpose18(kp)
+    a, b = OPENPOSE_LIMBS[i]
+    mid = (body[a, :2] + body[b, :2]) / 2
+    assert px(img, *mid) == dim(OPENPOSE_COLORS[i])
+
+
+def test_every_joint_centre_is_its_colour_at_full_intensity() -> None:
+    kp = big()
+    img = render_array(kp, BODY_ONLY, source_size=SIZE)
+    body = to_openpose18(kp)
+    for j in range(18):
+        if j in (14, 15, 16, 17):  # eyes and ears sit close together; checked below at a larger scale
+            continue
+        assert px(img, *body[j, :2]) == OPENPOSE_COLORS[j], j
+
+
+def test_head_joints_at_a_larger_scale() -> None:
+    kp = figure(scale=12)
+    img = render_array(kp, BODY_ONLY, source_size=(1200, 2400))
+    body = to_openpose18(kp)
+    for j in range(18):
+        assert px(img, *body[j, :2]) == OPENPOSE_COLORS[j], j
+
+
+def test_canvas_holds_only_convention_colours_with_hard_edges() -> None:
+    img = render_array(big(), source_size=SIZE)
+    allowed = (
+        {(0, 0, 0), HAND_DOT_COLOR, FACE_COLOR}
+        | set(OPENPOSE_COLORS)
+        | {dim(c) for c in OPENPOSE_COLORS}
+        | set(HAND_EDGE_COLORS)
+    )
+    assert colours(img) <= allowed  # no anti-aliased in-between shades
+
+
+def test_limb_ellipse_has_the_stick_width() -> None:
+    """Across the middle of the upper arm (a vertical-ish limb), the coloured run is about 2 x 4 px wide."""
+    kp = big()
+    img = render_array(kp, BODY_ONLY, source_size=SIZE)
+    body = to_openpose18(kp)
+    a, b = OPENPOSE_LIMBS[3]  # right elbow -> right wrist
+    mid = (body[a, :2] + body[b, :2]) / 2
+    row = img[int(mid[1])]
+    run = np.flatnonzero((row == dim(OPENPOSE_COLORS[3])).all(axis=1))
+    assert 7 <= len(run) <= 10
+
+
+def test_black_background_and_canvas_size() -> None:
+    img = render_pose(big(), source_size=SIZE)
+    assert img.mode == "RGB" and img.size == SIZE
+    arr = np.asarray(img)
+    assert tuple(arr[0, 0]) == (0, 0, 0) and tuple(arr[-1, -1]) == (0, 0, 0)
+
+
+# ── toggles and scores ───────────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_each_toggle_removes_exactly_its_part() -> None:
+    kp = big()
+    full = render_array(kp, source_size=SIZE)
+    for option, part in (("hands", (LEFT_HAND, RIGHT_HAND)), ("face", (FACE,))):
+        off = render_array(kp, RenderOptions(**{option: False}), source_size=SIZE)
+        unscored = kp.copy()
+        for s in part:
+            unscored[s, 2] = 0.0
+        assert np.array_equal(off, render_array(unscored, source_size=SIZE)), option
+        assert not np.array_equal(off, full), option
+    no_body = render_array(kp, RenderOptions(body=False), source_size=SIZE)
+    unscored = kp.copy()
+    unscored[:17, 2] = 0.0
+    assert np.array_equal(no_body, render_array(unscored, source_size=SIZE))
+    assert not (colours(no_body) & {dim(c) for c in OPENPOSE_COLORS[:17]} - {(0, 0, 0)})
+
+
+def test_hands_and_face_draw_their_colours() -> None:
+    img = render_array(big(), RenderOptions(body=False), source_size=SIZE)
+    cs = colours(img)
+    assert HAND_DOT_COLOR in cs and FACE_COLOR in cs
+    assert set(HAND_EDGE_COLORS) & cs
+    hands_only = render_array(big(), RenderOptions(body=False, face=False), source_size=SIZE)
+    assert FACE_COLOR not in colours(hands_only)
+
+
+def test_feet_are_never_drawn() -> None:
+    kp = big()
+    moved = kp.copy()
+    moved[FEET, :2] += 37.0
+    assert np.array_equal(render_array(kp, source_size=SIZE), render_array(moved, source_size=SIZE))
+
+
+def test_a_low_score_joint_suppresses_its_limbs_and_dot() -> None:
+    kp = big()
+    kp[8, 2] = 0.1  # right elbow (OpenPose 3): limbs 2 (shoulder-elbow) and 3 (elbow-wrist) go
+    img = render_array(kp, BODY_ONLY, source_size=SIZE)
+    body = to_openpose18(kp)
+    for i in (2, 3):
+        a, b = OPENPOSE_LIMBS[i]
+        assert px(img, *((body[a, :2] + body[b, :2]) / 2)) == (0, 0, 0)
+    assert px(img, *body[3, :2]) == (0, 0, 0)
+    assert px(img, *body[4, :2]) == OPENPOSE_COLORS[4]  # the wrist still gets its dot
+    assert dim(OPENPOSE_COLORS[2]) not in colours(img) and dim(OPENPOSE_COLORS[3]) not in colours(img)
+
+
+def test_a_low_score_shoulder_drops_the_synthesised_neck() -> None:
+    kp = big()
+    kp[5, 2] = 0.0
+    img = render_array(kp, BODY_ONLY, source_size=SIZE)
+    assert OPENPOSE_COLORS[1] not in colours(img)  # neck dot gone (its score is the lower shoulder's)
+
+
+def test_min_score_threshold_is_inclusive() -> None:
+    kp = big()
+    kp[:, 2] = 0.5
+    assert render_array(kp, RenderOptions(min_score=0.5), source_size=SIZE).any()
+    assert not render_array(kp, RenderOptions(min_score=0.51), source_size=SIZE).any()
+
+
+# ── robustness ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_off_canvas_nan_and_huge_keypoints_do_not_crash() -> None:
+    kp = big()
+    kp[9, :2] = (-500.0, -500.0)
+    kp[10, :2] = (np.nan, 30.0)
+    kp[13, :2] = (1e15, -1e15)
+    kp[14, :2] = (np.inf, 5.0)
+    kp[LEFT_HAND, 0] = np.nan
+    kp[RIGHT_HAND, :2] = 1e9
+    kp[FACE, 2] = np.nan
+    img = render_array(kp, source_size=SIZE)
+    assert img.shape == (800, 400, 3) and img.any()
+    everything_off = big()
+    everything_off[:, :2] += 10_000
+    assert not render_array(everything_off, source_size=SIZE).any()
+
+
+def test_a_partly_off_canvas_limb_is_clipped() -> None:
+    kp = big()
+    kp[:, 0] -= 150  # the figure's right side leaves the canvas
+    img = render_array(kp, BODY_ONLY, source_size=SIZE)
+    assert img.shape == (800, 400, 3) and img[:, :5].any()
+
+
+def test_empty_result_is_a_black_canvas() -> None:
+    r = result([], width=64, height=48)
+    img = render_array(r)
+    assert img.shape == (48, 64, 3) and not img.any()
+
+
+# ── sizing ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def joint_centroid(img: np.ndarray, color: tuple[int, int, int]) -> tuple[float, float]:
+    ys, xs = np.nonzero((img == color).all(axis=-1))
+    return float(xs.mean()), float(ys.mean())
+
+
+def test_scaling_to_a_larger_canvas_places_joints_where_expected() -> None:
+    kp = figure(scale=2)  # 200 x 400 frame
+    img = render_array(kp, BODY_ONLY, source_size=(200, 400), canvas_size=(400, 800))
+    body = to_openpose18(kp)
+    for j in (0, 4, 7, 10, 13):
+        x, y = joint_centroid(img, OPENPOSE_COLORS[j])
+        assert abs(x - body[j, 0] * 2) <= 1.0 and abs(y - body[j, 1] * 2) <= 1.0, j
+
+
+def test_contain_letterboxes_without_distortion() -> None:
+    kp = figure(scale=2)  # 200 x 400 frame onto a square canvas: scale 1, 100 px bars each side
+    img = render_array(kp, BODY_ONLY, source_size=(200, 400), canvas_size=(400, 400))
+    body = to_openpose18(kp)
+    for j in (0, 4, 7, 10, 13):
+        x, y = joint_centroid(img, OPENPOSE_COLORS[j])
+        assert abs(x - (body[j, 0] + 100)) <= 1.0 and abs(y - body[j, 1]) <= 1.0, j
+    assert not img[:, :100].any() and not img[:, 300:].any()
+
+
+def test_options_width_alone_keeps_the_aspect() -> None:
+    r = result([figure()], width=100, height=200)
+    assert render_pose(r, RenderOptions(width=50)).size == (50, 100)
+    assert render_pose(r, RenderOptions(height=50)).size == (25, 50)
+    assert render_pose(r, RenderOptions(width=30, height=30)).size == (30, 30)
+    assert render_pose(r, RenderOptions(width=30, height=30), canvas_size=(7, 9)).size == (7, 9)
+
+
+def test_transforms() -> None:
+    t = canvas_transform((100, 200), (300, 300), "contain")
+    assert (t.sx, t.sy, t.ox, t.oy) == (1.5, 1.5, 75.0, 0.0)
+    t = canvas_transform((100, 200), (300, 300), "cover")
+    assert (t.sx, t.sy, t.ox, t.oy) == (3.0, 3.0, 0.0, -150.0)
+    t = canvas_transform((100, 200), (300, 300), "stretch")
+    assert (t.sx, t.sy, t.ox, t.oy) == (3.0, 1.5, 0.0, 0.0)
+    pts = np.array([[10.0, 10.0], [30.0, 50.0]])
+    t = canvas_transform((100, 200), (100, 100), "skeleton", points=pts, margin=0.1)
+    mapped = t.apply(pts)
+    assert mapped[:, 1].min() == pytest.approx(10.0) and mapped[:, 1].max() == pytest.approx(90.0)
+    assert mapped[:, 0].mean() == pytest.approx(50.0)
+    with pytest.raises(ValueError):
+        canvas_transform((0, 1), (1, 1))
+
+
+def test_skeleton_fit_fills_the_canvas_with_a_margin() -> None:
+    kp = figure()  # tiny in its frame
+    img = render_array(kp, BODY_ONLY, source_size=(1000, 1000), canvas_size=(256, 256), fit="skeleton", margin=0.1)
+    ys, xs = np.nonzero(img.any(axis=-1))
+    assert ys.min() >= 25 - 5 and ys.max() <= 230 + 5  # joints at the margin, dots overhang by their radius
+    assert ys.max() - ys.min() > 190
+
+
+def test_stroke_scale_thickens_strokes() -> None:
+    kp = big()
+    thin = render_array(kp, BODY_ONLY, source_size=SIZE)
+    thick = render_array(kp, BODY_ONLY, source_size=SIZE, stroke_scale=2.0)
+    assert np.count_nonzero(thick.any(axis=-1)) > 1.5 * np.count_nonzero(thin.any(axis=-1))
+    auto = render_array(kp, BODY_ONLY, source_size=SIZE, canvas_size=(1024, 2048), stroke_scale="auto")
+    assert auto.shape == (2048, 1024, 3)
+    with pytest.raises(ValueError):
+        render_array(kp, source_size=SIZE, stroke_scale=0)
+
+
+# ── people ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_all_people_by_default_and_primary_only_on_request() -> None:
+    a, b = figure(scale=2), figure(scale=2, dx=200)
+    r = result([a, b], width=400, height=400)
+    both = render_array(r, BODY_ONLY)
+    only = render_array(r, BODY_ONLY, primary_only=True)
+    assert both[:, 200:].any() and both[:, :200].any()
+    assert only[:, :200].any() and not only[:, 200:].any()
+    assert np.array_equal(only, render_array(a, BODY_ONLY, source_size=(400, 400)))
+    second_primary = result([a, b], width=400, height=400, primary=1)
+    assert not render_array(second_primary, BODY_ONLY, primary_only=True)[:, :200].any()
+
+
+def test_people_as_arrays_and_stacks() -> None:
+    a, b = figure(scale=2), figure(scale=2, dx=200)
+    stack = render_array(np.stack([a, b]), source_size=(400, 400))
+    listed = render_array([a, b], source_size=(400, 400))
+    assert np.array_equal(stack, listed)
+    with pytest.raises(ValueError):
+        render_array(a)  # bare arrays need a source size
+    with pytest.raises(ValueError):
+        render_array(np.zeros((17, 3)), source_size=(10, 10))
+
+
+def test_limbs_of_every_person_are_dimmed_once() -> None:
+    a, b = figure(scale=2), figure(scale=2, dx=200)
+    img = render_array([a, b], BODY_ONLY, source_size=(400, 400))
+    for kp in (a, b):
+        body = to_openpose18(kp)
+        x, y = (body[3, :2] + body[4, :2]) / 2
+        assert px(img, x, y) == dim(OPENPOSE_COLORS[3])
+
+
+# ── output ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def test_png_is_deterministic_and_decodes_to_the_array() -> None:
+    r = result([figure(scale=2), figure(scale=2, dx=200)], width=400, height=400)
+    one, two = render_png(r), render_png(r)
+    assert one == two and one[:8] == b"\x89PNG\r\n\x1a\n"
+    decoded = np.asarray(Image.open(io.BytesIO(one)).convert("RGB"))
+    assert np.array_equal(decoded, render_array(r))
