@@ -24,32 +24,50 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# The version is handed in (the release tag without the "v"), so the build context carries no .git and the image
-# needs no git binary: hatch-vcs (setuptools-scm) reads SETUPTOOLS_SCM_PRETEND_VERSION instead of walking history.
-# It must be the plain name -- hatch-vcs ignores the ..._FOR_ARGUS_PUPPET spelling. It is exported only for the
-# install below, not baked into the image's environment. The default keeps a bare `docker build .` working.
-ARG VERSION=0.0.0.dev0
-# GPU=1 builds the CUDA image: the [gpu] extra (onnxruntime-gpu, NVML and the broker client) instead of [cpu], with
-# the CUDA and cuDNN runtimes as NVIDIA's pip wheels (onnxruntime-gpu[cuda,cudnn]) so the base stays python-slim;
-# argus_puppet.runtime preloads them through onnxruntime.preload_dlls(). It needs the NVIDIA container runtime and a
-# driver new enough for the CUDA major that onnxruntime-gpu targets. The default (0) is the CPU image.
-ARG GPU=0
+# This image has neither .git in its build context nor a git binary, so the
+# version always comes from the VERSION build-arg (the release passes the tag).
+# A bare local `docker build .` falls back to 0.0.0.dev0.
 
 COPY . .
 
-RUN export SETUPTOOLS_SCM_PRETEND_VERSION="$VERSION" \
+# The release passes the tag (without the v) as VERSION, so the image reports it
+# whatever git makes of the tree. SETUPTOOLS_SCM_PRETEND_VERSION is set only in
+# the subshell that builds this package's wheel: as an ENV it would persist in
+# the image and also version any dependency built from source. It must be the
+# plain spelling -- hatch-vcs passes no dist name to setuptools-scm, so
+# SETUPTOOLS_SCM_PRETEND_VERSION_FOR_<DIST> is ignored.
+# tests/test_image_version.py keeps this wired to the release workflow.
+ARG VERSION=""
+# GPU=1 builds the CUDA image (the release publishes it as <tag>-gpu): the
+# package's [gpu] extra instead of [cpu], so pyproject.toml declares both. For
+# ONNX Runtime they are onnxruntime-gpu and onnxruntime, which share one module
+# directory, so exactly one may be installed. The CUDA and cuDNN runtimes can
+# come as NVIDIA's pip wheels (onnxruntime-gpu[cuda,cudnn]) so the base stays
+# python-slim. Running it needs the NVIDIA container runtime. The default (0)
+# is the CPU image.
+ARG GPU=0
+RUN (export SETUPTOOLS_SCM_PRETEND_VERSION="${VERSION:-0.0.0.dev0}" \
+        && uv build --wheel --out-dir /tmp/dist) \
+    && if [ "$GPU" = "1" ]; then extra=gpu; else extra=cpu; fi \
+    && uv pip install --system --no-cache "$(ls /tmp/dist/*.whl)[server,${extra}]" \
+    && rm -rf /tmp/dist
+
+# ── argus-puppet additions (not template output; keep them below the template's install block) ──
+# The template installs `[server,<cpu|gpu>]`; pyproject's server extra pulls in cli, so `argus-puppet serve` (the CMD)
+# and `argus-puppet models fetch` are there. certifi is pinned past the distrusted roots, like the system store above.
+# GPU=1 adds the CUDA and cuDNN runtimes as NVIDIA's pip wheels (onnxruntime-gpu[cuda,cudnn], at the version the
+# install chose) so the base stays python-slim; argus_puppet.runtime preloads them through onnxruntime.preload_dlls().
+# The CPU onnxruntime wheel shares onnxruntime-gpu's module directory and wins if anything pulled it in: drop it, lay
+# the GPU build back down, then fail the build unless the CUDA provider is really there.
+RUN uv pip install --system --no-cache "certifi>=2026.10.19" \
     && if [ "$GPU" = "1" ]; then \
-        uv pip install --system --no-cache "certifi>=2026.10.19" ".[server,cli,gpu]" "onnxruntime-gpu[cuda,cudnn]" \
-        # The CPU onnxruntime wheel shares onnxruntime-gpu's module directory and wins if anything pulled it in: \
-        # drop it and lay the GPU build back down, then fail the build unless the CUDA provider is really there. \
+        ort_gpu="$(uv pip show --system onnxruntime-gpu | sed -n 's/^Version: //p')" \
+        && uv pip install --system --no-cache "onnxruntime-gpu[cuda,cudnn]==$ort_gpu" \
         && if uv pip show --system onnxruntime >/dev/null 2>&1; then \
-            ort_gpu="$(uv pip show --system onnxruntime-gpu | sed -n 's/^Version: //p')" \
-            && uv pip uninstall --system onnxruntime \
+            uv pip uninstall --system onnxruntime \
             && uv pip install --system --no-cache --reinstall --no-deps "onnxruntime-gpu==$ort_gpu"; \
         fi \
         && python -c "import onnxruntime as o, sys; p = o.get_available_providers(); print('providers:', p); sys.exit(0 if 'CUDAExecutionProvider' in p else 'CUDAExecutionProvider missing')"; \
-    else \
-        uv pip install --system --no-cache "certifi>=2026.10.19" ".[server,cli,cpu]"; \
     fi \
     && argus-puppet version
 
