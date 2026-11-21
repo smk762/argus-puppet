@@ -139,6 +139,18 @@ def test_models_fetch_reports_each_model(monkeypatch, tmp_path) -> None:
 # ── serve ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
+def test_models_fetch_into_a_read_only_dir_fails_cleanly(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("ARGUS_PUPPET_MODEL_DIR", str(tmp_path))
+
+    def fetch_model(settings, name, *, force=False):
+        raise weights.WeightsError(f"could not write {name}: Read-only file system")
+
+    monkeypatch.setattr(weights, "fetch_model", fetch_model)
+    result = runner.invoke(app, ["models", "fetch", "yolox_nano"])
+    assert result.exit_code == 1 and "could not write" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_serve_binds_loopback_by_default(monkeypatch) -> None:
     calls = {}
     fake_uvicorn = types.ModuleType("uvicorn")

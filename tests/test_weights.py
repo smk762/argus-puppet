@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import io
+import os
 import zipfile
 
 import pytest
@@ -127,6 +128,20 @@ def test_a_fetch_error_becomes_a_weights_error(monkeypatch, s) -> None:
         weights.fetch_model(s, m.name, fetcher=boom)
 
 
+def test_a_model_dir_that_cannot_be_written_is_a_weights_error(monkeypatch, s) -> None:
+    m = pin(monkeypatch, "yolox_nano", ONNX)
+    s.model_dir.mkdir(parents=True)
+    s.model_dir.chmod(0o555)
+    try:
+        if os.access(s.model_dir, os.W_OK):
+            pytest.skip("running as a user who can write to a 0555 folder")
+        with pytest.raises(weights.WeightsError, match="could not write"):
+            weights.fetch_model(s, m.name, fetcher=lambda url, n: ONNX)
+    finally:
+        s.model_dir.chmod(0o755)
+    assert list(s.model_dir.iterdir()) == []
+
+
 def test_status_reports_presence_and_verification(monkeypatch, s) -> None:
     m = pin(monkeypatch, "yolox_nano", ONNX)
     s.model_dir.mkdir(parents=True)
@@ -164,11 +179,37 @@ def test_net_fetcher_passes_timeouts_and_a_cap(monkeypatch) -> None:
 
 
 def test_net_fetcher_refuses_other_hosts(monkeypatch) -> None:
-    monkeypatch.setattr("argus_cortex.net.fetch", lambda url, **kw: Reply("https://evil.example/x", [url]))
     with pytest.raises(weights.WeightsError, match="not an allowed model host"):
         weights.net_fetcher("https://example.com/model.onnx", 10)
-    with pytest.raises(weights.WeightsError, match="redirected"):
-        weights.net_fetcher("https://download.openmmlab.com/m.zip", 10)
+
+
+def test_a_redirect_off_the_allow_list_is_refused_before_it_is_followed(monkeypatch) -> None:
+    """Every hop is resolved through puppet's resolver, which refuses a host off ALLOWED_HOSTS: the redirect target
+    is never connected to, let alone downloaded from (the real argus_cortex.net.fetch, a mock transport)."""
+    import functools
+
+    import httpx
+    from argus_cortex import net
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["host"])
+        if request.headers["host"] == "github.com":
+            return httpx.Response(302, headers={"location": "https://evil.example/model.onnx"})
+        return httpx.Response(200, content=b"x" * 64)
+
+    monkeypatch.setattr(weights, "_system_resolve", lambda host, port: ["140.82.112.3"])  # no DNS in tests
+    monkeypatch.setattr(net, "fetch", functools.partial(net.fetch, transport=httpx.MockTransport(handler)))
+    with pytest.raises(weights.WeightsError, match="evil.example"):
+        weights.net_fetcher("https://github.com/a/b/model.onnx", 1000)
+    assert seen == ["github.com"]
+    monkeypatch.setattr(
+        net,
+        "fetch",
+        functools.partial(net.fetch.func, transport=httpx.MockTransport(lambda r: httpx.Response(200, content=b"ok"))),
+    )
+    assert weights.net_fetcher("https://github.com/a/b/model.onnx", 1000) == b"ok"
 
 
 def test_every_registry_url_is_on_an_allowed_host() -> None:

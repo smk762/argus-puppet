@@ -43,9 +43,9 @@ A pinned model is a name bound to one exact file: its size and SHA-256.
   threshold and NMS IoU. `PoseSetStats.estimator` and `PoseSetComparison.estimator` carry the same record when every
   pose in the set shares it, so a score can always be traced to the exact weights behind it.
 - **Downloads are verified before they are written.** `models fetch` downloads only from OpenMMLab's and GitHub's
-  hosts (redirects to other hosts are refused). For a zip, the archive must match its pinned hash; only the one
-  named member is read, and only if its declared size is the pinned size. The `.onnx` bytes must then match the
-  pinned size and hash. The file is written to a temporary name and moved into place, so a failed or interrupted
+  hosts (a redirect to any other host is refused before it is followed; the hash pins are what guarantee the
+  bytes). For a zip, the archive must match its pinned hash; only the one named member is read, and only if its
+  declared size is the pinned size. The `.onnx` bytes must then match the pinned size and hash. The file is written to a temporary name and moved into place, so a failed or interrupted
   download leaves nothing behind.
 
 Changing a pin is a code change to `registry.py`, and a test (`tests/test_must_never.py`) checks every entry has a

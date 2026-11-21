@@ -1,8 +1,10 @@
 """Fetch and verify the pinned model files (``argus-puppet models list|fetch|verify``).
 
 Downloads go through :func:`argus_cortex.net.fetch` (SSRF-checked, pinned connection, capped body, timeouts), and
-only from the registry's two upstream hosts and the hosts they redirect to (:data:`ALLOWED_HOSTS`). A file is
-written only after its bytes are verified:
+only from the registry's two upstream hosts and the hosts they redirect to (:data:`ALLOWED_HOSTS`): fetch resolves
+every hop through :func:`_allowed_resolver`, which refuses any other host before it is connected to. The hash pins
+below are the real guarantee; the host list keeps the download from going anywhere else. A file is written only
+after its bytes are verified:
 
 * a zip (DWPose ships in OpenMMLab's SDK zips) must hash to the pinned ``archive_sha256``; then exactly one member
   named ``archive_member`` is read (never ``extractall``; a member with an absolute path or ``..`` is refused, and
@@ -19,6 +21,7 @@ import contextlib
 import hashlib
 import io
 import os
+import socket
 import tempfile
 import zipfile
 from collections.abc import Callable, Iterable
@@ -69,19 +72,49 @@ def _host(url: str) -> str:
     return (urlsplit(url).hostname or "").lower()
 
 
+def _system_resolve(host: str, port: int) -> list[str]:
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return list(dict.fromkeys(str(i[4][0]) for i in infos))
+
+
+def _allowed_resolver(refused: list[str]) -> Callable[[str, int], list[str]]:
+    """A resolver for :func:`argus_cortex.net.fetch` (its *resolve* hook, called for every hop before connecting) that
+    refuses a host off :data:`ALLOWED_HOSTS`, noting it in *refused*. fetch still checks the addresses it returns."""
+
+    def resolve(host: str, port: int) -> list[str]:
+        if host.lower().rstrip(".") not in ALLOWED_HOSTS:
+            refused.append(host)
+            raise OSError(f"{host} is not an allowed model host")
+        return _system_resolve(host, port)
+
+    return resolve
+
+
 def net_fetcher(url: str, max_bytes: int) -> bytes:
-    """Download *url* with :func:`argus_cortex.net.fetch`, refusing any hop off :data:`ALLOWED_HOSTS`."""
+    """Download *url* with :func:`argus_cortex.net.fetch`, refusing any hop off :data:`ALLOWED_HOSTS` before it is
+    followed."""
     try:
-        from argus_cortex.net import fetch  # noqa: PLC0415 - httpx is behind cortex's [remote] extra
+        from argus_cortex.net import UrlRefused, fetch  # noqa: PLC0415 - httpx is behind cortex's [remote] extra
     except ImportError as exc:  # pragma: no cover - only without httpx
         raise WeightsError("downloading needs httpx: pip install 'argus-cortex[remote]'") from exc
     if _host(url) not in ALLOWED_HOSTS:
         raise WeightsError(f"refusing to download from {_host(url) or url!r}: not an allowed model host")
-    reply = fetch(url, timeout=FETCH_TIMEOUT_S, deadline=FETCH_DEADLINE_S, max_bytes=max_bytes).raise_for_status()
-    for hop in [*reply.redirects, reply.url]:
-        if _host(hop) not in ALLOWED_HOSTS:
-            raise WeightsError(f"the download of {url} was redirected to {_host(hop)!r}, not an allowed model host")
-    return reply.body
+    refused: list[str] = []
+    try:
+        reply = fetch(
+            url,
+            timeout=FETCH_TIMEOUT_S,
+            deadline=FETCH_DEADLINE_S,
+            max_bytes=max_bytes,
+            resolve=_allowed_resolver(refused),
+        )
+    except UrlRefused as exc:
+        if refused:
+            raise WeightsError(
+                f"the download of {url} was redirected to {refused[-1]!r}, not an allowed model host"
+            ) from exc
+        raise
+    return reply.raise_for_status().body
 
 
 def _sha256(data: bytes) -> str:
@@ -171,6 +204,9 @@ def fetch_model(settings: Settings, name: str, *, fetcher: Fetcher | None = None
         raise WeightsError(f"{name} is {len(body)} bytes, not the pinned {m.bytes}")
     if _sha256(body) != m.sha256:
         raise WeightsError(f"{name} does not match its pinned SHA-256")
-    write_atomic(path, body)
+    try:
+        write_atomic(path, body)
+    except OSError as exc:  # a read-only model directory, a full disk
+        raise WeightsError(f"could not write {name} to {path}: {exc.strerror or exc}") from exc
     log.info("model_written", model=name, path=str(path))
     return path
