@@ -20,9 +20,14 @@ Every distance is the mirror-invariant pose distance of [pose-vector.md](pose-ve
 | `min_joint_score` | 0.3 | a joint is confident at or above this score |
 | `min_usable_joints` | 8 | confident body joints (of 17) a primary person needs to be usable |
 | `cluster_threshold` | 0.25 | average-linkage cut: clusters merge while closer than this |
+| `min_shared_joints` | 6 | body joints confident in both poses for their distance to be defined |
+| `min_shared_limb_joints` | 2 | of those, how many must be limb joints (elbows, wrists, knees, ankles) |
+| `diversity_scale` | 0.3 | the distance scale `s` of the diversity score below |
 | memorisation `threshold` | 0.08 | `compare_pose_sets`: an output closer than this to a reference frame is flagged |
 
-The first three travel in the result as `MetricParams`; the defaults are `metrics.DEFAULT_PARAMS`.
+All but the memorisation threshold travel in every result as `MetricParams`, whose fields default to these values
+(`MetricParams()`, also `metrics.DEFAULT_PARAMS`); a request may give any subset. The threshold is recorded on the
+comparison itself.
 
 ## Set stats
 
@@ -67,7 +72,7 @@ the angle of the elbows.
 of usable poses, of a saturating transform of their distance:
 
 ```
-g(d)      = 1 - exp(-(d / 0.3)^2)
+g(d)      = 1 - exp(-(d / s)^2)                         (s = diversity_scale, default 0.3)
 diversity = mean_{i < j, d_ij defined} g(d_ij)          (0 under two usable poses or no defined pair)
 ```
 
@@ -220,15 +225,16 @@ toward the centre.
 
 ## Set-vs-set comparison
 
-`compare_pose_sets(outputs, reference)` embeds both sets with the same parameters and, for every usable output
-pose, finds the nearest usable reference pose under the mirror-invariant distance.
+`compare_pose_sets(outputs, reference)` embeds both sets with the same parameters and, for every output, finds the
+nearest usable reference pose under the mirror-invariant distance.
 
 | field | definition |
 |---|---|
-| `matches` | one per usable output that has at least one comparable reference pose, sorted by output image: `nearest`, `distance`, `memorised = distance < threshold`. Ties for nearest go to the alphabetically first reference image |
-| `output_count` | outputs matched (unusable outputs, and outputs with no comparable reference pose, have no entry) |
+| `matches` | one per output image, sorted by image name: `nearest`, `distance`, `memorised = distance < threshold`. An output that is unusable, or shares too few joints with every usable reference pose, has `nearest` and `distance` null and `memorised` false. Ties for nearest go to the alphabetically first reference image |
+| `output_count` | every output image, usable or not (one `matches` entry each) |
+| `matched_count` | outputs with a nearest reference pose |
 | `reference_count` | usable reference poses |
-| `memorised_share` | memorised matches / matches; 0 with none |
+| `memorised_share` | memorised outputs / `matched_count`; 0 when nothing matched. Unusable and unmatched outputs are left out of the denominator: they are no evidence either way, so check `matched_count` before reading the share |
 | `output_coverage`, `reference_coverage` | label histograms of the usable poses of each set |
 | `coverage_divergence` | Jensen-Shannon divergence (base 2) between the two coverages, averaged over stance, arms and facing; 0 = the same mix of poses, 1 = disjoint |
 

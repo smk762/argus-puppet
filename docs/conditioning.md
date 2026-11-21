@@ -34,7 +34,7 @@ black or one of the convention's colours. A point is drawn only when its score i
 
 ### Options
 
-`RenderOptions` (also the body of the render endpoint):
+`RenderOptions` (also the `options` of `POST /render`, and the flags of `argus-puppet render`):
 
 | Field | Default | Effect |
 |---|---|---|
@@ -43,8 +43,13 @@ black or one of the convention's colours. A point is drawn only when its score i
 | `face` | true | Draw the face landmarks. |
 | `width`, `height` | source size | Canvas size. Give one alone to keep the source aspect ratio. |
 | `min_score` | 0.3 | Points below this score are not drawn; a limb needs both its joints. |
+| `fit` | `contain` | How the source frame maps onto a canvas of another shape (see below). |
+| `primary_only` | false | Draw only the primary subject instead of every person. |
+| `stroke_scale` | 1.0 | Multiplies every stroke width and radius; `"auto"` is `min(width, height) / 512` (see below). |
+| `margin` | 0.05 | `fit="skeleton"` only: the fraction of each side kept clear. |
 
-Every person in the image is drawn by default; `primary_only` draws just the primary subject.
+The render functions also take `fit`, `margin`, `stroke_scale` and `primary_only` as keyword arguments, which
+override the options when given.
 
 Face dots are dense: some ControlNets give strong facial-expression control with them, others are confused by
 them. Turn `face` off if the generated faces look distorted, and `hands` off for models trained on body-only
@@ -74,7 +79,7 @@ from argus_puppet.models import PoseResult, RenderOptions
 from argus_puppet.render import render_png
 
 result = PoseResult.model_validate_json(open("photo.pose.json").read())
-png = render_png(result, RenderOptions(width=1024, height=1024, face=False), stroke_scale="auto")
+png = render_png(result, RenderOptions(width=1024, height=1024, face=False, stroke_scale="auto"))
 ```
 
 ## The pose library
@@ -90,27 +95,59 @@ cluster id, and its provenance: the source image's name and SHA-256.
    which image each pose came from, and that image stays the pose's origin.
 2. **Extract poses** with the estimator, producing a `.pose.json` sidecar per image.
 3. **Build** from the sidecars. Each image contributes its primary person if their mean body-joint score is at
-   least `min_body_score` (default 0.3); images with nobody usable are skipped. Entry ids are derived from the
-   source image's hash and the keypoints, so rebuilding from the same inputs gives the same ids.
-4. **Deduplicate** (optional, `dedupe_threshold`): a pose closer than the threshold to a better-scoring pose
-   already kept is dropped, so bursts of near-identical frames collapse to their best one.
-5. **Cluster** (optional): a clusterer assigns each entry a cluster id, used to stratify sampling.
-6. **Cap** (optional, `max_entries`): keep a diverse subset of that size (see below).
+   least `min_body_score` (default 0.3); images with nobody usable are skipped. Each entry is labelled (stance,
+   arms, facing; `labels.pose_labels`). Entry ids are derived from the source image's hash and the keypoints, so
+   rebuilding from the same inputs gives the same ids.
+4. **Age check** (optional, `age_gate`; on with real-person sources): see below.
+5. **Deduplicate** (`dedupe_threshold`, default 0.08; `None` turns it off): a pose closer than the threshold to a
+   better-scoring pose already kept is dropped, so bursts of near-identical frames collapse to their best one.
+6. **Cluster** (default: average linkage at the metrics' 0.25 cut; `clusterer=None` turns it off): each entry gets
+   a cluster id, used to stratify sampling.
+7. **Cap** (optional, `max_entries`): keep a diverse subset of that size (see below).
 
 ```python
 from argus_puppet.library import build_library, save_library
+from argus_puppet.sidecars import load_sidecars
 
-build = build_library(results, created_from="CC0 photos, folder poses/", dedupe_threshold=0.1, max_entries=500)
+build = build_library(load_sidecars("poses/"), created_from="CC0 photos of adults, folder poses/", max_entries=500)
 save_library(build.library, "poses.library.json")   # atomic: temp file, then rename
 ```
 
-`build` also reports how many images were skipped and why. The library file is written atomically with sorted
-keys, so it diffs cleanly and a crash never leaves a half-written file.
+The CLI does the same: `argus-puppet library build poses/ --out poses.library.json` (add `--extract` to pose images
+that have no sidecar yet). `build` also reports how many images were skipped and why. The library file is written
+atomically with sorted keys, so it diffs cleanly and a crash never leaves a half-written file.
 
-The pose distance used for deduplication, clustering and sampling is the suite's mirror-invariant pose distance,
-so a pose and its mirror image count as the same pose. When it is not supplied, a simple stand-in is used:
-hip-centred, torso-scaled mean body-joint distance (also mirror-invariant). Its units are torso lengths, which is
-what the 0.1 threshold above suits; the real metric has its own scale.
+The pose distance used for deduplication, clustering and sampling is the suite's mirror-invariant pose distance
+(`metrics.keypoint_distance_matrix`, in torso units; see [pose-vector.md](pose-vector.md)), so a pose and its mirror
+image count as the same pose. A pose the distance cannot use (too few confident joints) is never a duplicate and
+sits in a cluster of its own. Each step takes a replacement callable (`distance_matrix`, `labeler`, `clusterer`).
+
+**Choosing 0.08.** The library's "same pose" is the comparison's "memorised" (see
+[metrics.md](metrics.md#the-memorisation-threshold)), so the suite has one definition. Re-estimating one pose sits
+at a median 0.04 and a 99th percentile 0.09 on the synthetic figures, and the two closest *distinct* presets
+(standing and hands on hips) are 0.12 apart. 0.08 removes nearly every re-estimated copy (a burst of frames, one
+photo at two sizes) and stays a third below the closest distinct pair, so no real pose variety is lost; the rare
+copy that survives costs one extra entry.
+
+### The age check
+
+The suite keeps any frame where a face **or a body** reads under 18 out of a pose library, background people
+included. With real photos, build with the age check on: `argus-puppet library build poses/ --out lib.json
+--age-check`, or `build_library(..., age_gate=AgeGate(HttpAgeEstimator(url), load_image))` from Python.
+
+- Each candidate image (one that would otherwise become an entry) is posted to argus-curator's
+  `POST /faces?body=true` at `ARGUS_PUPPET_AGE_URL`: InsightFace faces plus a body pass, each with a MiVOLO age
+  estimate. The URL only ever comes from the settings, the call has a timeout and an overall deadline, and redirects
+  are not followed. Nothing is sent unless the check is asked for.
+- The image is kept only when **every** face and body reads 18 or over.
+- It **fails closed**: an image is also excluded when the service is down or answers an error, when the answer
+  cannot vouch for the image (a face or unmatched body without an estimate, a body pass that did not report `ok`),
+  when nobody at all could be estimated, or when the image beside the sidecar cannot be read or no longer matches the
+  SHA-256 its pose was extracted from.
+- The build reports `age_passed`, `under_age` and `age_unchecked`, and each excluded image with the reason. The CLI
+  exits 1 and writes no library when the check could not check a single image.
+- The library records `age_checked: true`. A library built without the check says `false`, and its source images
+  should be treated as unchecked.
 
 ### Diverse sampling
 
