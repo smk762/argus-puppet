@@ -165,8 +165,10 @@ def model_errors(exc: Exception) -> HTTPException:
         return HTTPException(503, str(exc))
     if isinstance(exc, gpu.LEASE_ERRORS):
         return HTTPException(503, f"GPU busy: {exc}", headers={"Retry-After": str(GPU_RETRY_S)})
-    if isinstance(exc, gpu.CoordinatorInvalid):  # /health reports it as "invalid"; no Retry-After: retrying won't help
-        return HTTPException(503, str(exc))
+    # A misconfigured coordinator (/health says "invalid") or a broker refusing the request itself (a bad token, a
+    # rejected request): the operator's to fix, so no Retry-After: retrying won't help.
+    if isinstance(exc, gpu.OPERATOR_ERRORS):
+        return HTTPException(503, gpu.operator_message(exc))
     raise exc
 
 
@@ -245,10 +247,16 @@ def _name(raw: str | None, filename: str | None) -> str:
 def health(state: AppState) -> Health:
     """``GET /health``'s body (blocking: it may hash the model files once; call it off the event loop)."""
     settings = state.settings
-    cuda = runtime.uses_cuda(settings.device)
+    # The truth so far: CUDA counts only while the provider is compiled in, the driver sees a GPU and no session came
+    # back without it (runtime.cuda_problem); it is never claimed for work that runs on the CPU.
+    device = runtime.effective_device(settings.device)
+    problem = runtime.cuda_problem() if runtime.wants_cuda(settings.device) else None
+    cuda = device == "cuda" and problem is None
     est = state.fixed_estimator or estimator_mod.get_estimator(settings)
+    via = None
     try:
-        coordinator = (state.coordinator or gpu.default_coordinator()).name
+        coord = state.coordinator or gpu.default_coordinator()
+        coordinator, via = coord.name, gpu.last_via(coord)
     except gpu.CoordinatorInvalid:  # an unknown ARGUS_GPU_COORDINATOR: leases fail the same way (503)
         coordinator = "invalid"
     return Health(
@@ -258,8 +266,10 @@ def health(state: AppState) -> Health:
         pose_model=settings.pose_model,
         detector_model=settings.detector_model,
         provider=getattr(est, "provider", None),
-        device="cuda" if cuda else "cpu",
+        device=device,
+        cuda_unavailable=problem,
         gpu_coordinator=coordinator,
+        last_lease_via=via,
         free_vram_mb=free_vram_mb(0) if cuda else None,
     )
 

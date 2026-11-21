@@ -138,7 +138,8 @@ def pose_image(
     ``"upload"`` for bytes). On CUDA a GPU lease is held at *priority* for the call.
 
     Raises :class:`~argus_cortex.limits.BadInput` / :class:`~argus_cortex.limits.TooLarge` for a bad image,
-    :class:`~argus_puppet.runtime.ModelUnavailable`, or a lease error (:data:`argus_puppet.gpu.LEASE_ERRORS`)."""
+    :class:`~argus_puppet.runtime.ModelUnavailable`, or a lease error (:data:`argus_puppet.gpu.LEASE_ERRORS`,
+    :data:`argus_puppet.gpu.OPERATOR_ERRORS`)."""
     settings = settings or Settings.from_env()
     if isinstance(image, bytes):
         data, default_name = image, "upload"

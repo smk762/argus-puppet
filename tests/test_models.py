@@ -305,7 +305,7 @@ def test_wire_1_1_adds_optional_person_labels() -> None:
 
 
 def test_wire_1_2_adds_optional_unusable_reasons() -> None:
-    assert PUPPET_VERSION == "1.2"
+    assert PUPPET_VERSION == "1.3"
     defs = json.loads(render_wire_schema())["$defs"]
     for model, fld in (
         ("PoseSetItem", "unusable_reason"),

@@ -7,10 +7,11 @@ publishes it on the host's loopback (see [deploy.md](deploy.md)). The app is `ar
 
 Every request and response body is a type from `src/argus_puppet/models.py`, the wire contract. Its field
 descriptions are authoritative and are rendered to `schema/puppet-wire.schema.json`. Top-level documents carry
-`puppet_version` (currently `"1.2"`); a 1.x reader ignores fields it does not know, and every 1.x reader accepts a
+`puppet_version` (currently `"1.3"`); a 1.x reader ignores fields it does not know, and every 1.x reader accepts a
 1.0 document. 1.1 added `PersonPose.labels` (see [`POST /pose`](#post-pose)). 1.2 added why a pose is unusable:
 `unusable_reason` on `/stats` items and `/compare` matches, with counts by reason beside them (see
-[`POST /stats`](#post-stats)).
+[`POST /stats`](#post-stats)). 1.3 added `cuda_unavailable` and `last_lease_via` to
+[`GET /health`](#get-health), whose `device` now says where work really runs.
 
 ## Routes
 
@@ -37,10 +38,11 @@ curl -s http://<PUPPET_HOST>:8220/health
 ```
 
 ```json
-{"puppet_version": "1.2", "version": "0.2.0", "read_only": false,
+{"puppet_version": "1.3", "version": "0.2.0", "read_only": false,
  "models": {"dwpose-l-384x288": true, "dwpose-m-256x192": true, "yolox_m": true, "yolox_nano": true},
  "pose_model": "dwpose-l-384x288", "detector_model": "yolox_m",
- "provider": null, "device": "cpu", "gpu_coordinator": "none", "free_vram_mb": null}
+ "provider": null, "device": "cpu", "cuda_unavailable": null,
+ "gpu_coordinator": "none", "last_lease_via": null, "free_vram_mb": null}
 ```
 
 | Field | Meaning |
@@ -48,11 +50,31 @@ curl -s http://<PUPPET_HOST>:8220/health
 | `models` | Registry name to whether its file is present and matches its pinned size and SHA-256. The first call hashes the files (about 310 MB), so it can take a few seconds; later calls use a cache |
 | `pose_model`, `detector_model` | The models `POST /pose` and `/pose/scan` run (`ARGUS_PUPPET_POSE_MODEL`, `ARGUS_PUPPET_DETECTOR_MODEL`) |
 | `provider` | The ONNX Runtime execution provider, or `null` until the first pose request loads a model |
-| `device` | `cuda` when ONNX Runtime has the CUDA provider and the device setting allows it, else `cpu` |
+| `device` | Where pose work runs: `cuda` or `cpu`. See [Device](#device) |
+| `cuda_unavailable` | Why CUDA cannot be used, when the device setting wants it (`auto` or `cuda`) and it is known to be missing; else `null` |
 | `gpu_coordinator` | `none`, `lease` or `broker` (`ARGUS_GPU_COORDINATOR`), or `invalid` for an unknown value |
+| `last_lease_via` | How the last GPU lease was granted: `local` (the `none` or `lease` coordinator), `broker`, or `fallback` (the broker could not be reached, so `ARGUS_GPU_BROKER_FALLBACK` granted it); `null` before the first lease |
 | `free_vram_mb` | Free GPU memory on CUDA when measurable, else `null` |
 
 Always 200.
+
+#### Device
+
+ONNX Runtime having the CUDA provider compiled in does not mean a session gets it: in a container started without
+`--gpus` it fails to create the provider and quietly runs on the CPU. So puppet counts CUDA as usable only while all
+of these hold: the provider is compiled in, the CUDA driver loads and sees a GPU (a cheap check, run once, that holds
+no GPU memory), and no session has come back without CUDA. The first thing that fails is logged once as a
+`cuda_unavailable` warning, with the reason, and reported in `cuda_unavailable`. It stays for the life of the process.
+
+| `ARGUS_PUPPET_DEVICE` | CUDA usable | CUDA unavailable |
+|---|---|---|
+| `auto` (default) | `device: cuda`; a GPU lease per request | Runs on the CPU, takes no GPU lease. `device: cpu`, `cuda_unavailable` says why |
+| `cuda` | `device: cuda`; a GPU lease per request | Refused: pose requests get a 503 naming the reason; nothing runs on the CPU and no lease is taken. `device: cuda`, `cuda_unavailable` says why |
+| `cpu` | `device: cpu`, never probed | `device: cpu` |
+
+Before the first pose request, `device` reflects the provider and driver check. If the first session then comes
+back without CUDA, `device` changes to `cpu` (with `auto`) from that request on. `provider` names what the session
+got.
 
 ### `POST /pose`
 
@@ -248,7 +270,7 @@ Each set counts against the set cap separately, so one request can carry two set
 One pose to an OpenPose-convention skeleton PNG for a pose ControlNet.
 
 ```json
-{"pose": {"puppet_version": "1.2", "image": "photo.jpg", "...": "a whole PoseResult"},
+{"pose": {"puppet_version": "1.3", "image": "photo.jpg", "...": "a whole PoseResult"},
  "options": {"width": 1024, "height": 1024, "face": false, "stroke_scale": "auto"}}
 ```
 
@@ -316,6 +338,8 @@ Other 503s carry a different meaning:
 |---|---|---|
 | `busy: try again` (with `Retry-After: 1`) | Over the admission bound | Retry |
 | `GPU busy: ...` (with `Retry-After: 5`) | The GPU lease was refused or timed out (argus-iris or the host lease) | Retry later |
+| `the GPU broker refused the lease request; this is a configuration problem ...` | argus-iris answered the lease request with a 4xx (a missing or wrong `ARGUS_GPU_BROKER_TOKEN`, a request it rejects) or a reply puppet cannot read (an incompatible lease version). An unreachable broker is not this: puppet falls back to `ARGUS_GPU_BROKER_FALLBACK` | Operator: fix the token or URL, or align argus-iris and argus-cortex. Retrying will not help |
+| `CUDA was asked for (device 'cuda') but cannot be used: ...` | `ARGUS_PUPPET_DEVICE=cuda` and no usable CUDA (see [Device](#device)); `GET /health` gives the reason in `cuda_unavailable` | Operator: give the container the GPU (`--gpus all`), or set `ARGUS_PUPPET_DEVICE=auto` or `cpu`. Retrying will not help |
 | `Model ... not found ...`, `... does not match its pinned SHA-256 ...`, `onnxruntime is not installed ...` | The service cannot run a model | Operator: `argus-puppet models fetch` / `verify`, or install an ONNX Runtime extra. Retrying will not help |
 | `the GPU coordinator is misconfigured (ARGUS_GPU_COORDINATOR) ...` | `ARGUS_GPU_COORDINATOR` names no coordinator; `GET /health` reports `gpu_coordinator: invalid`. Only on CUDA, where a lease is needed | Operator: fix the variable (`none`, `lease` or `broker`). Retrying will not help |
 

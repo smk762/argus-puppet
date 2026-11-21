@@ -8,37 +8,13 @@ import os
 import subprocess
 import sys
 import time
-import types
 
 import pytest
+import structlog.testing
+from conftest import fake_ort
 
 from argus_puppet import registry, runtime
 from argus_puppet.config import Settings
-
-
-def fake_ort(monkeypatch, available=("CPUExecutionProvider",)):
-    """Install a fake ``onnxruntime`` module that records the sessions it builds."""
-    built = []
-
-    class SessionOptions:
-        log_severity_level = 2
-
-    class InferenceSession:
-        def __init__(self, path, sess_options=None, providers=None):
-            self.path, self.providers = path, providers
-            built.append(self)
-
-        def get_providers(self):
-            return [p[0] if isinstance(p, tuple) else p for p in self.providers]
-
-    mod = types.ModuleType("onnxruntime")
-    mod.get_available_providers = lambda: list(available)
-    mod.SessionOptions = SessionOptions
-    mod.InferenceSession = InferenceSession
-    monkeypatch.setitem(sys.modules, "onnxruntime", mod)
-    monkeypatch.setattr(runtime, "_cuda_preloaded", True)
-    runtime.clear_sessions()
-    return built
 
 
 @pytest.fixture
@@ -196,3 +172,106 @@ def test_importing_the_package_does_not_need_onnxruntime() -> None:
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert out.returncode == 0, out.stderr
     assert out.stdout.strip() == "ok"
+
+
+# ── device truth: CUDA counts only when a session really got it ─────────────────────────────────────────────────────
+
+REAL_PROBE = runtime._probe_cuda_driver  # the autouse fixture stubs it per test; this is the real one
+
+
+def _cuda_warnings(logs) -> list[dict]:
+    return [e for e in logs if e["event"] == "cuda_unavailable"]
+
+
+def test_a_session_that_came_back_without_cuda_moves_auto_to_the_cpu(pinned, monkeypatch) -> None:
+    """ORT has CUDA compiled in but could not create it: the session runs on the CPU. That is seen, logged once, and
+    from then on auto names the CPU (so no GPU lease), and the CPU session is reused rather than rebuilt."""
+    s, name = pinned
+    s = dataclasses.replace(s, device="auto")
+    built = fake_ort(monkeypatch, ("CUDAExecutionProvider", "CPUExecutionProvider"), drops_cuda=True)
+    assert runtime.uses_cuda("auto")  # all that is known before a session: compiled in, driver sees a GPU
+    with structlog.testing.capture_logs() as logs:
+        session = runtime.load_session(s, name)
+        assert runtime.load_session(s, name) is session and len(built) == 1
+        runtime.providers("auto")
+    assert session.get_providers() == ["CPUExecutionProvider"]
+    assert not runtime.uses_cuda("auto") and runtime.providers("auto") == ["CPUExecutionProvider"]
+    assert runtime.effective_device("auto") == "cpu"
+    assert "without CUDAExecutionProvider" in runtime.cuda_problem()
+    warned = _cuda_warnings(logs)
+    assert len(warned) == 1 and warned[0]["log_level"] == "warning" and "CUDAExecutionProvider" in warned[0]["reason"]
+
+
+def test_explicit_cuda_is_refused_rather_than_run_on_the_cpu(pinned, monkeypatch) -> None:
+    """ARGUS_PUPPET_DEVICE=cuda and the session came back on the CPU: refused, loudly, and so is every later load."""
+    s, name = pinned
+    s = dataclasses.replace(s, device="cuda")
+    built = fake_ort(monkeypatch, ("CUDAExecutionProvider", "CPUExecutionProvider"), drops_cuda=True)
+    with pytest.raises(runtime.CudaUnavailable, match="ARGUS_PUPPET_DEVICE=auto"):
+        runtime.load_session(s, name)
+    with pytest.raises(runtime.CudaUnavailable):
+        runtime.load_session(s, name)
+    assert len(built) == 1  # the second refusal builds nothing
+    assert not runtime.uses_cuda("cuda") and runtime.effective_device("cuda") == "cuda"
+    assert isinstance(runtime.CudaUnavailable("x"), runtime.ModelUnavailable)  # so /pose answers 503
+
+
+def test_no_driver_is_known_before_any_session(pinned, monkeypatch) -> None:
+    """A CUDA build in a container started without --gpus: the driver probe says so up front (no session needed),
+    auto runs on the CPU and explicit cuda is refused before the model is even read."""
+    s, name = pinned
+    built = fake_ort(monkeypatch, ("CUDAExecutionProvider", "CPUExecutionProvider"))
+    probes = []
+    monkeypatch.setattr(runtime, "_probe_cuda_driver", lambda: probes.append(1) or "libcuda.so.1 cannot be loaded")
+    with structlog.testing.capture_logs() as logs:
+        assert runtime.providers("auto") == ["CPUExecutionProvider"] and not runtime.uses_cuda("auto")
+        assert runtime.effective_device("auto") == "cpu" and runtime.providers("cpu") == ["CPUExecutionProvider"]
+        with pytest.raises(runtime.CudaUnavailable, match="libcuda"):
+            runtime.load_session(dataclasses.replace(s, device="cuda"), name)
+        assert built == []
+        session = runtime.load_session(dataclasses.replace(s, device="auto"), name)
+    assert session.providers == ["CPUExecutionProvider"]  # never asked ORT for CUDA
+    assert len(probes) == 1 and len(_cuda_warnings(logs)) == 1
+
+
+def test_explicit_cuda_on_a_cpu_only_onnxruntime_is_refused(pinned, monkeypatch) -> None:
+    s, name = pinned
+    built = fake_ort(monkeypatch)
+    with pytest.raises(runtime.CudaUnavailable, match="no CUDAExecutionProvider"):
+        runtime.load_session(dataclasses.replace(s, device="cuda"), name)
+    assert built == []
+
+
+def test_cpu_never_probes_or_warns(monkeypatch) -> None:
+    fake_ort(monkeypatch)
+    monkeypatch.setattr(runtime, "_probe_cuda_driver", lambda: pytest.fail("probed for the cpu device"))
+    with structlog.testing.capture_logs() as logs:
+        assert runtime.providers("cpu") == ["CPUExecutionProvider"] and runtime.effective_device("cpu") == "cpu"
+    assert _cuda_warnings(logs) == []
+
+
+class _FakeLibcuda:
+    def __init__(self, init_rc: int = 0, count_rc: int = 0) -> None:
+        self.init_rc, self.count_rc = init_rc, count_rc
+
+    def cuInit(self, flags):  # noqa: N802 - the driver's name
+        return self.init_rc
+
+    def cuDeviceGetCount(self, ref):  # noqa: N802 - leaves the count at 0
+        return self.count_rc
+
+
+def test_the_driver_probe_says_why(monkeypatch) -> None:
+    monkeypatch.setattr(runtime.sys, "platform", "linux")
+
+    def missing(name):
+        raise OSError(f"{name}: cannot open shared object file")
+
+    monkeypatch.setattr(runtime.ctypes, "CDLL", missing)
+    assert "libcuda.so.1" in REAL_PROBE() and "container" in REAL_PROBE()
+    monkeypatch.setattr(runtime.ctypes, "CDLL", lambda name: _FakeLibcuda(init_rc=100))
+    assert "cuInit error 100" in REAL_PROBE()
+    monkeypatch.setattr(runtime.ctypes, "CDLL", lambda name: _FakeLibcuda())
+    assert "sees no GPU" in REAL_PROBE()
+    monkeypatch.setattr(runtime.ctypes, "CDLL", lambda name: _FakeLibcuda(count_rc=3))
+    assert "error 3" in REAL_PROBE()

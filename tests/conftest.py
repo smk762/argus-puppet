@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import io
 import os
+import sys
+import types
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,6 +22,18 @@ from argus_puppet import registry
 from argus_puppet.config import Settings
 from argus_puppet.models import EstimatorProvenance, PersonPose
 from argus_puppet.skeleton import NUM_KEYPOINTS
+
+
+@pytest.fixture(autouse=True)
+def _fresh_cuda_state(monkeypatch) -> Iterator[None]:
+    """What is known about CUDA is process-wide: every test starts from nothing, and the driver probe (ctypes into
+    libcuda) is stubbed to "a GPU is there", so a test decides the rest with its fake onnxruntime and sessions."""
+    from argus_puppet import runtime
+
+    runtime.reset_cuda_state()
+    monkeypatch.setattr(runtime, "_probe_cuda_driver", lambda: None)
+    yield
+    runtime.reset_cuda_state()
 
 
 @pytest.fixture(autouse=True)
@@ -193,6 +207,37 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(model_dir=tmp_path / "models", device="cpu")
 
 
+def fake_ort(monkeypatch, available=("CPUExecutionProvider",), *, drops_cuda: bool = False):
+    """Install a fake ``onnxruntime`` module that records the sessions it builds (and forget what is known about
+    CUDA: it is a new onnxruntime). *drops_cuda*: sessions come back without ``CUDAExecutionProvider`` even when it
+    was asked for, as the real one does when it cannot create the provider (no driver, no GPU)."""
+    from argus_puppet import runtime
+
+    built = []
+
+    class SessionOptions:
+        log_severity_level = 2
+
+    class InferenceSession:
+        def __init__(self, path, sess_options=None, providers=None):
+            self.path, self.providers = path, providers
+            built.append(self)
+
+        def get_providers(self):
+            names = [p[0] if isinstance(p, tuple) else p for p in self.providers]
+            return [n for n in names if not (drops_cuda and n == "CUDAExecutionProvider")]
+
+    mod = types.ModuleType("onnxruntime")
+    mod.get_available_providers = lambda: list(available)
+    mod.SessionOptions = SessionOptions
+    mod.InferenceSession = InferenceSession
+    monkeypatch.setitem(sys.modules, "onnxruntime", mod)
+    monkeypatch.setattr(runtime, "_cuda_preloaded", True)
+    runtime.clear_sessions()
+    runtime.reset_cuda_state()
+    return built
+
+
 @pytest.fixture
 def fake() -> FakeEstimator:
     return FakeEstimator()
@@ -204,3 +249,4 @@ def cuda(monkeypatch) -> None:
     from argus_puppet import runtime
 
     monkeypatch.setattr(runtime, "providers", lambda device: [runtime.CUDA, runtime.CPU])
+    monkeypatch.setattr(runtime, "cuda_problem", lambda: None)

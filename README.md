@@ -119,7 +119,7 @@ it apart from other packages' `<stem>.json` sidecars). It is a `PoseResult`, the
 
 ```jsonc
 {
-  "puppet_version": "1.2",
+  "puppet_version": "1.3",
   "image": "woman_yoga.jpg",
   "image_sha256": "…",
   "width": 480, "height": 720,
