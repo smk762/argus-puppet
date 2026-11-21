@@ -254,8 +254,8 @@ sources come out at a consistent size.
 
 The control image goes to a ControlNet node next to the prompt: in ComfyUI, load the PNG (or receive it from the
 render endpoint) and connect it to *Apply ControlNet* with an OpenPose / pose ControlNet model, no preprocessor
-(the image is already a skeleton). argus-darkroom takes it as the pose input of a ControlNet generation. A
-strength around 0.6 to 1.0 holds the pose; lower values let the prompt override it.
+(the image is already a skeleton). Any ControlNet pipeline that accepts an OpenPose control image can take it
+as the pose input of a generation. A strength around 0.6 to 1.0 holds the pose; lower values let the prompt override it.
 
 Set the canvas to the generation resolution and aspect ratio. A skeleton drawn for a portrait canvas and fed to
 a landscape generation is stretched by the generator, which is exactly the distortion `contain` and `skeleton`

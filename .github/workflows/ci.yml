@@ -17,6 +17,9 @@ jobs:
   ci:
     uses: smk762/argus-ci/.github/workflows/python-ci.yml@v1
     with:
+      # python_min and the next minor, as in release.yml (tests/test_workflows.py checks
+      # every version here satisfies requires-python; argus-ci's default is 3.11 + 3.12).
+      python-versions: '["3.11", "3.12"]'
       ruff-version: "0.15.16"
       test-extras: "dev,server,cli,cpu"
       post-test: "uv run --no-sync argus-puppet schema --check"

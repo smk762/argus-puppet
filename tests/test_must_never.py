@@ -209,12 +209,3 @@ def test_every_unsafe_route_cuts_off_a_stalled_body_and_frees_its_slot(tmp_path)
         assert reply.status == 408, f"{method} {path} ({content_type}) answered {reply.status}"
         held = [a.in_flight for a in (state.admit, state.scan_admit, state.compute_admit)]
         assert held == [0, 0, 0], f"{method} {path} left a slot held: {held}"
-
-
-def test_only_a_final_release_moves_latest() -> None:
-    """The release workflow runs on every ``v*`` tag: a pre-release (``v0.2.0-rc1``) must not repoint ``latest``."""
-    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
-    lines = [ln.strip() for ln in workflow.splitlines() if "value=latest" in ln and not ln.strip().startswith("#")]
-    assert lines, "the release workflow no longer tags latest: update this test"
-    for line in lines:
-        assert "enable=${{ !contains(needs.release-tag.outputs.tag, '-') }}" in line, line

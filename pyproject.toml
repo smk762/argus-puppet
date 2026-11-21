@@ -33,7 +33,10 @@ dependencies = [
 # ONNX Runtime for the estimators: pick one of cpu / gpu (they install the same `onnxruntime` module).
 cpu = ["onnxruntime>=1.18"]
 gpu = ["onnxruntime-gpu>=1.18", "argus-cortex[gpu,remote,yaml]>=0.13,<0.14"]
+# server pulls in cli: the service runs as `argus-puppet serve`, and its model volume is filled with
+# `argus-puppet models fetch`, so a server install (the image's `[server,<cpu|gpu>]`) needs the CLI too.
 server = [
+    "argus-puppet[cli]",
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "python-multipart>=0.0.7",
