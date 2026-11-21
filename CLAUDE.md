@@ -60,8 +60,9 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 - `config.py` — `Settings.from_env()` (`ARGUS_PUPPET_*`), `ConfigError`, and `DEFAULT_PORT` (the only code constant for the port;
   it may change).
 - `runtime.py` — ONNX Runtime plumbing: `providers(device)` (CUDA only when ORT really has it), the capped CUDA arena
-  (`kSameAsRequested`, `Settings.gpu_mem_limit_mb` else 1024 MB per session), `check_model` (size + SHA-256 against the
-  registry, hash memoised by path/mtime/size) before any load, cached `load_session`, `ModelUnavailable` (ends with the
+  (`kSameAsRequested`, `Settings.gpu_mem_limit_mb` else 1024 MB per session), cached `load_session` built from the
+  bytes `read_model` just read and hashed (never reopened by path, no memo on the load path), `check_model` for
+  health/verify (hash memoised by path, device, inode, size, mtime and ctime), `ModelUnavailable` (ends with the
   `argus-puppet models fetch` hint). onnxruntime is optional: never import it at module level.
 - `estimator.py` — the numpy + ORT + Pillow pipeline (YOLOX raw head, then RTMPose SimCC; matches rtmlib to ~0 px).
   `Estimator` protocol (`estimate(image) -> list[PersonPose]`, `provenance()`), `OnnxEstimator`, and

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import os
 import subprocess
 import sys
+import time
 import types
 
 import pytest
@@ -94,16 +96,67 @@ def test_check_model_verifies_size_and_hash(pinned) -> None:
     assert not runtime.model_verified(s, name)
 
 
-def test_the_hash_is_memoised_by_mtime_and_size(pinned, monkeypatch) -> None:
-    s, name = pinned
-    path = s.model_path(name)
-    first = runtime.file_sha256(path)
-    calls = []
+def _counting_sha256(monkeypatch) -> list[int]:
+    calls: list[int] = []
     real = hashlib.sha256
     monkeypatch.setattr(runtime.hashlib, "sha256", lambda *a: calls.append(1) or real(*a))
-    assert runtime.file_sha256(path) == first and calls == []
-    path.write_bytes(b"changed!")
-    assert runtime.file_sha256(path) != first and calls == [1]
+    return calls
+
+
+def test_the_hash_memo_is_invalidated_by_any_change_to_the_file(pinned, monkeypatch) -> None:
+    """The memo (health, models verify) is keyed on path, device, inode, size, mtime and ctime: every rewrite below
+    keeps the size, so only the other parts of the key can notice it."""
+    s, name = pinned
+    path = s.model_path(name)
+    size = path.stat().st_size
+    first = runtime.file_sha256(path)
+    want = {c: hashlib.sha256(c * size).hexdigest() for c in (b"B", b"C")}
+    calls = _counting_sha256(monkeypatch)  # counts every hashlib.sha256 call from here on
+    assert runtime.file_sha256(path) == first and calls == []  # unchanged: memoised
+
+    path.write_bytes(b"A" * size)  # in place, same size, a new mtime
+    os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 10**9))
+    a = runtime.file_sha256(path)
+    assert a != first and calls == [1]
+
+    before = path.stat()
+    path.write_bytes(b"B" * size)  # in place, same size, the mtime put back: only the ctime can tell
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    while path.stat().st_ctime_ns == before.st_ctime_ns:  # a coarse clock: wait for the ctime to move
+        time.sleep(0.005)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert path.stat().st_mtime_ns == before.st_mtime_ns
+    assert runtime.file_sha256(path) == want[b"B"] and calls == [1, 1]
+
+    swapped = path.with_name("swap.tmp")  # a new file moved into place, every time stamp copied over
+    swapped.write_bytes(b"C" * size)
+    st = path.stat()
+    os.utime(swapped, ns=(st.st_atime_ns, st.st_mtime_ns))
+    os.replace(swapped, path)
+    assert runtime.file_sha256(path) == want[b"C"] and calls == [1, 1, 1]
+
+
+def test_load_session_hashes_the_bytes_it_loads(pinned, monkeypatch) -> None:
+    """The bytes handed to onnxruntime are the bytes just hashed: no memo can vouch for them, and the file is not
+    reopened by path after the check."""
+    s, name = pinned
+    built = fake_ort(monkeypatch)
+    path = s.model_path(name)
+    pinned_bytes = path.read_bytes()
+    runtime.load_session(s, name)
+    assert built[0].path == pinned_bytes  # the verified bytes themselves, not a path to reopen
+    runtime.clear_sessions()
+    assert runtime.model_verified(s, name)  # the memo now vouches for this path's stat key
+    forged = b"Z" * len(pinned_bytes)
+    st = path.stat()
+    with path.open("r+b") as f:  # other bytes, written in place
+        f.write(forged)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    key = runtime._stat_key(path)
+    monkeypatch.setitem(runtime._hash_cache, key, registry.get(name).sha256)  # a memo that wrongly vouches
+    with pytest.raises(runtime.ModelUnavailable, match="SHA-256"):
+        runtime.load_session(s, name)
+    assert len(built) == 1
 
 
 def test_load_session_verifies_caps_and_caches(pinned, monkeypatch) -> None:

@@ -4,8 +4,11 @@ onnxruntime is an optional extra (``[cpu]`` or ``[gpu]``): nothing here imports 
 ``import argus_puppet`` works without it and a missing install surfaces as :class:`ModelUnavailable`.
 
 Every model file is checked against its registry pin (size, then SHA-256) before its first load: a file whose bytes
-are not the pinned ones is refused, never run. Hashes are memoised by path, mtime and size, so a 134 MB file is
-hashed once per process (and again only if it changes on disk).
+are not the pinned ones is refused, never run. A load reads the file once, hashes those bytes and hands the same
+bytes to ONNX Runtime, so nothing can change between the check and the load, and no memo vouches for it. (The 134 MB
+pose model is then held twice for a moment, as Python bytes and as ORT parses them; the bytes are dropped once the
+session is built.) ``GET /health`` and ``models verify`` only ask whether a file verifies: their hashes are memoised
+by path, device, inode, size, mtime and ctime, so a file is hashed once per process and again after any change.
 """
 
 from __future__ import annotations
@@ -121,14 +124,20 @@ def session_providers(names: Sequence[str], gpu_mem_limit_mb: int | None) -> lis
 
 # ── verification ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-_hash_cache: dict[tuple[str, int, int], str] = {}
+_hash_cache: dict[tuple[str, int, int, int, int, int], str] = {}
 _hash_lock = threading.Lock()
 
 
-def file_sha256(path: Path) -> str:
-    """SHA-256 of *path* (lower-case hex), memoised by path, mtime and size."""
+def _stat_key(path: Path) -> tuple[str, int, int, int, int, int]:
+    """What the hash memo is keyed on. mtime alone can be put back (``os.utime``) after a rewrite; the ctime cannot be
+    set, and a file moved into place has another inode."""
     st = path.stat()
-    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    return (str(path.resolve()), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def file_sha256(path: Path) -> str:
+    """SHA-256 of *path* (lower-case hex), memoised by its :func:`_stat_key` (for checks that load nothing)."""
+    key = _stat_key(path)
     with _hash_lock:
         hit = _hash_cache.get(key)
     if hit is not None:
@@ -160,6 +169,27 @@ def check_model(settings: Settings, name: str) -> Path:
     return path
 
 
+def read_model(settings: Settings, name: str) -> bytes:
+    """The bytes of pinned model *name*, read once and verified (size, then SHA-256 of these very bytes).
+
+    Raises :class:`ModelUnavailable` when it is missing, unreadable, the wrong size, or hashes to something else."""
+    pinned = registry.get(name)
+    path = settings.model_path(name)
+    if not path.is_file():
+        raise ModelUnavailable(f"Model {name} not found at {path}.")
+    try:
+        with path.open("rb") as f:
+            data = f.read(pinned.bytes + 1)
+    except OSError as exc:
+        raise ModelUnavailable(f"Model {name} at {path} could not be read: {exc.strerror or exc}.") from exc
+    if len(data) != pinned.bytes:
+        raise ModelUnavailable(f"Model {name} at {path} is not the pinned {pinned.bytes} bytes.")
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != pinned.sha256:
+        raise ModelUnavailable(f"Model {name} at {path} does not match its pinned SHA-256 (got {digest[:12]}...).")
+    return data
+
+
 def model_verified(settings: Settings, name: str) -> bool:
     """Whether pinned model *name* is present and verified (never raises for a bad file)."""
     try:
@@ -176,7 +206,8 @@ _session_lock = threading.Lock()
 
 
 def load_session(settings: Settings, name: str, device: str | None = None) -> Any:
-    """A cached ``onnxruntime.InferenceSession`` for pinned model *name*, verified before its first load.
+    """A cached ``onnxruntime.InferenceSession`` for pinned model *name*, built from the bytes :func:`read_model`
+    verified (the provider list and the CUDA arena options apply as for a path).
 
     Raises :class:`ModelUnavailable` (onnxruntime missing, file missing or not the pinned bytes)."""
     names = tuple(providers(device or settings.device))
@@ -187,15 +218,17 @@ def load_session(settings: Settings, name: str, device: str | None = None) -> An
         if hit is not None:
             return hit
         ort = _ort()
-        check_model(settings, name)
+        data = read_model(settings, name)
         options = ort.SessionOptions()
         options.log_severity_level = 3  # errors only: ORT's warnings about unused initialisers are noise
         try:
             session = ort.InferenceSession(
-                str(path), sess_options=options, providers=session_providers(names, settings.gpu_mem_limit_mb)
+                data, sess_options=options, providers=session_providers(names, settings.gpu_mem_limit_mb)
             )
         except Exception as exc:  # noqa: BLE001 - any ORT load failure is "cannot run this model"
             raise ModelUnavailable(f"Model {name} at {path} could not be loaded: {exc}.") from exc
+        finally:
+            del data
         log.info("session_loaded", model=name, providers=session.get_providers())
         _sessions[key] = session
         return session
