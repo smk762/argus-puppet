@@ -1429,7 +1429,7 @@
         },
         "min_score": {
           "default": 0.3,
-          "description": "Points below this score are not drawn.",
+          "description": "Visibility threshold, as the DWPose annotator applies it: a body joint is drawn when its score is above this (the synthesised neck only when both shoulders are), a hand or face point at or above it.",
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Min Score",
@@ -1453,8 +1453,8 @@
               "type": "string"
             }
           ],
-          "default": 1.0,
-          "description": "Multiplies every line width and radius; 'auto' is min(width, height) / 512, as the annotators' ~512 px working resolution looks once resized.",
+          "default": "auto",
+          "description": "Multiplies every line width and radius. 'auto' (the default) is min(width, height) / 512: the annotators draw at a 512 px working resolution and resize to the output, so their strokes scale with the canvas (below 1 under 512 px). 1 draws the annotator's pixel sizes at any canvas size.",
           "title": "Stroke Scale"
         },
         "width": {

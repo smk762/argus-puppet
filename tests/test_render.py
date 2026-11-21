@@ -21,7 +21,7 @@ from argus_puppet.render import (
 )
 from argus_puppet.skeleton import FACE, FEET, LEFT_HAND, OPENPOSE_COLORS, OPENPOSE_LIMBS, RIGHT_HAND, to_openpose18
 
-BODY_ONLY = RenderOptions(hands=False, face=False)
+BODY_ONLY = RenderOptions(hands=False, face=False, stroke_scale=1.0)  # the annotator's pixel sizes
 SIZE = (400, 800)
 
 
@@ -170,11 +170,56 @@ def test_a_low_score_shoulder_drops_the_synthesised_neck() -> None:
     assert OPENPOSE_COLORS[1] not in colours(img)  # neck dot gone (its score is the lower shoulder's)
 
 
-def test_min_score_threshold_is_inclusive() -> None:
+def test_visibility_follows_the_annotator() -> None:
+    # Regression: body joints were drawn at a score of exactly min_score; the annotator needs strictly more for body
+    # joints (and both shoulders above it for the neck), while hand and face points at the threshold are drawn.
     kp = big()
-    kp[:, 2] = 0.5
-    assert render_array(kp, RenderOptions(min_score=0.5), source_size=SIZE).any()
-    assert not render_array(kp, RenderOptions(min_score=0.51), source_size=SIZE).any()
+    kp[5, 2] = 0.3  # left shoulder exactly at the threshold: no shoulder dot, no neck, no limbs touching either
+    img = render_array(kp, BODY_ONLY, source_size=SIZE)
+    for c in (OPENPOSE_COLORS[1], OPENPOSE_COLORS[5], dim(OPENPOSE_COLORS[0]), dim(OPENPOSE_COLORS[12])):
+        assert c not in colours(img)
+    assert OPENPOSE_COLORS[2] in colours(img)  # the other shoulder still drawn
+    at = big()
+    at[:, 2] = 0.3
+    assert not render_array(at, BODY_ONLY, source_size=SIZE).any()  # body: strictly above
+    hands_face = render_array(at, RenderOptions(body=False), source_size=SIZE)
+    assert HAND_DOT_COLOR in colours(hands_face) and FACE_COLOR in colours(hands_face)  # hands and face: at or above
+    assert not render_array(at, RenderOptions(min_score=0.31), source_size=SIZE).any()
+
+
+# ── people ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def _overlap_people() -> tuple[np.ndarray, np.ndarray]:
+    """A's neck -> nose limb (12, blue) crosses B's neck -> right-shoulder limb (0, red) at (50, 50), where neither
+    has a joint dot; A's first face point sits on B's left-hand root at (20, 20)."""
+    a, b = np.zeros((133, 3)), np.zeros((133, 3))
+    a[0], a[5], a[6] = (50, 20, 0.9), (40, 80, 0.9), (60, 80, 0.9)  # A: neck (50, 80), nose (50, 20)
+    b[5], b[6] = (110, 50, 0.9), (10, 50, 0.9)  # B: neck (60, 50), right shoulder (10, 50)
+    a[FACE.start] = (20, 20, 0.9)
+    b[LEFT_HAND.start] = (20, 20, 0.9)
+    return a, b
+
+
+def test_two_people_overlap_in_the_annotator_order() -> None:
+    # Regression: people were drawn one after another, so overlap colours depended on the order they were listed.
+    a, b = _overlap_people()
+    for people in ([a, b], [b, a]):
+        img = render_array(people, RenderOptions(stroke_scale=1.0), source_size=(100, 100))
+        assert px(img, 50, 50) == dim(OPENPOSE_COLORS[12])  # limb 12 is drawn after limb 0, whoever owns it
+        assert px(img, 20, 20) == FACE_COLOR  # every face after every hand
+    first, second = (render_array(p, source_size=(100, 100)) for p in ([a, b], [b, a]))
+    assert np.array_equal(first, second)  # no same-index overlap here, so the person order cannot matter
+
+
+def test_right_hands_are_drawn_after_every_left_hand() -> None:
+    a, b = np.zeros((133, 3)), np.zeros((133, 3))
+    a[RIGHT_HAND.start : RIGHT_HAND.start + 2] = [(10, 50, 0.9), (90, 50, 0.9)]  # edge 0 of A's right hand: red
+    b[LEFT_HAND.start + 0] = (50, 10, 0.9)
+    b[LEFT_HAND.start + 5] = (50, 90, 0.9)  # edge 4 of B's left hand (root -> 5), crossing at (50, 50)
+    for people in ([a, b], [b, a]):
+        img = render_array(people, RenderOptions(body=False, face=False, stroke_scale=1.0), source_size=(100, 100))
+        assert px(img, 50, 50) == HAND_EDGE_COLORS[0]  # A's right hand, drawn after B's left hand
 
 
 # ── robustness ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -268,6 +313,16 @@ def test_skeleton_fit_fills_the_canvas_with_a_margin() -> None:
     assert ys.max() - ys.min() > 190
 
 
+def test_strokes_scale_with_the_canvas_by_default() -> None:
+    # Regression: the default drew the annotator's 512 px sizes on any canvas, half the reference thickness at 1024.
+    kp = big()
+    assert RenderOptions().stroke_scale == "auto"
+    for side, k in ((1024, 2.0), (512, 1.0), (256, 0.5)):
+        default = render_array(kp, RenderOptions(hands=False, face=False), source_size=SIZE, canvas_size=(side, side))
+        fixed = render_array(kp, BODY_ONLY, source_size=SIZE, canvas_size=(side, side), stroke_scale=k)
+        assert np.array_equal(default, fixed), side
+
+
 def test_stroke_scale_thickens_strokes() -> None:
     kp = big()
     thin = render_array(kp, BODY_ONLY, source_size=SIZE)
@@ -277,9 +332,6 @@ def test_stroke_scale_thickens_strokes() -> None:
     assert auto.shape == (2048, 1024, 3)
     with pytest.raises(ValueError):
         render_array(kp, source_size=SIZE, stroke_scale=0)
-
-
-# ── people ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 def test_all_people_by_default_and_primary_only_on_request() -> None:

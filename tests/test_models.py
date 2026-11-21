@@ -236,7 +236,7 @@ def test_render_options_and_health_defaults() -> None:
     opts = RenderOptions()
     assert (opts.body, opts.hands, opts.face, opts.min_score) == (True, True, True, 0.3)
     assert opts.width is None and opts.height is None
-    assert (opts.fit, opts.primary_only, opts.stroke_scale, opts.margin) == ("contain", False, 1.0, 0.05)
+    assert (opts.fit, opts.primary_only, opts.stroke_scale, opts.margin) == ("contain", False, "auto", 0.05)
     assert RenderOptions(stroke_scale="auto").stroke_scale == "auto"
     for bad in ({"stroke_scale": 0}, {"stroke_scale": "big"}, {"fit": "zoom"}, {"margin": 0.5}):
         with pytest.raises(ValidationError):

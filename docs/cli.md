@@ -164,7 +164,7 @@ $ argus-puppet render [OPTIONS] {source}
 * `--height <int range>`: Canvas height (default: the source&#x27;s)  [1&lt;=x&lt;=8192]
 * `--fit <str>`: How the source frame maps onto the canvas: contain, cover, stretch, skeleton  [default: contain]
 * `--primary-only`: Draw only the primary person
-* `--stroke-scale <str>`: Stroke width factor, or &#x27;auto&#x27; (min side / 512)  [default: 1]
+* `--stroke-scale <str>`: Stroke width factor, or &#x27;auto&#x27; (min side / 512, the annotators&#x27; scaling)  [default: auto]
 * `--min-score <float>`: Points scoring below this are not drawn  [default: 0.3]
 * `-r, --recursive`: With a folder: include subfolders
 * `--write-sidecar`: Save the sidecar of any image posed here

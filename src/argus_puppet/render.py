@@ -6,21 +6,27 @@ interoperability spec:
 
 * a black RGB canvas;
 * **body**: the wholebody keypoints become OpenPose-18 (:func:`skeleton.to_openpose18`, the neck synthesised from
-  the shoulders). Each of the 17 :data:`skeleton.OPENPOSE_LIMBS` whose two joints are both confident is a filled
+  the shoulders). Each of the 17 :data:`skeleton.OPENPOSE_LIMBS` whose two joints are both visible is a filled
   ellipse centred on the limb's midpoint, semi-major half the limb's length, semi-minor :data:`STICK_WIDTH`, in
   ``OPENPOSE_COLORS[i]``. Once every limb of every person is drawn the whole limb layer is multiplied by 0.6
-  (:data:`LIMB_DIM`); then each confident joint ``j`` is a filled disc of radius :data:`JOINT_RADIUS` in
+  (:data:`LIMB_DIM`); then each visible joint ``j`` is a filled disc of radius :data:`JOINT_RADIUS` in
   ``OPENPOSE_COLORS[j]`` at full intensity;
 * **hands**: per hand, the 20 :data:`skeleton.HAND_EDGES`; edge ``i`` is a :data:`HAND_LINE_WIDTH` px line in
-  ``hsv(i / 20, 1, 1)``, drawn when both ends are confident; then each confident hand point is a radius
+  ``hsv(i / 20, 1, 1)``, drawn when both ends are visible; then each visible hand point is a radius
   :data:`HAND_DOT_RADIUS` disc in pure blue;
-* **face**: each confident face landmark (all 68) is a white disc of radius :data:`FACE_DOT_RADIUS`;
-* feet are never drawn, and a point scoring below ``min_score`` is dropped, as is one with a non-finite coordinate
-  or one more than 1e6 px from the origin (treated as unplaced; it keeps the pixel maths in range).
+* **face**: each visible face landmark (all 68) is a white disc of radius :data:`FACE_DOT_RADIUS`;
+* feet are never drawn.
 
-Draw order is body limbs, the 0.6 dimming, body joints, then each person's hands (edges, then dots) and face. Later
-shapes overwrite earlier ones; nothing is blended. Shapes are aliased (hard edges), as the reference annotators draw
-them, so every pixel is either black or one of the convention's colours.
+**Visibility** follows the DWPose annotator: a body joint is visible when its score is strictly above ``min_score``
+(so the synthesised neck, scored as the lower shoulder, only when both shoulders are), a hand or face point when its
+score is at or above it. A point with a non-finite coordinate, or one more than 1e6 px from the origin, is never
+drawn (treated as unplaced; it keeps the pixel maths in range).
+
+**Draw order** across people is the annotator's: limb 0 of every person, then limb 1 of every person, and so on; the
+0.6 dimming; joint 0 of every person, joint 1, ...; then every left hand, then every right hand (each hand's edges,
+then its dots); then every face. So where two people overlap, the higher limb or joint index wins whichever person
+is listed first. Later shapes overwrite earlier ones; nothing is blended. Shapes are aliased (hard edges), as the
+reference annotators draw them, so every pixel is either black or one of the convention's colours.
 
 **Sizing.** Keypoints live in their source image's pixel frame. The canvas is the source size unless a size is
 asked for. ``fit`` decides how the source frame maps onto a canvas of another shape:
@@ -35,11 +41,11 @@ asked for. ``fit`` decides how the source frame maps onto a canvas of another sh
 Every one of these (``fit``, ``margin``, ``stroke_scale``, ``primary_only``) is a :class:`RenderOptions` field; the
 keyword arguments of the render functions override the options when given (``None`` means "take the option").
 
-A point maps as ``x' = x * scale + offset``. **Line widths and radii are fixed pixel sizes** (``stroke_scale=1``):
-4 px stick half-width, radius-4 joints, 2 px hand lines, radius-3 face dots, whatever the canvas size, as the
-annotators draw at their working resolution. The annotators usually draw at a ~512 px detect resolution and the
-result is resized to the output, so on large canvases their strokes look proportionally thicker; pass
-``stroke_scale="auto"`` (``min(width, height) / 512``) to mimic that.
+A point maps as ``x' = x * scale + offset``. **Line widths and radii scale with the canvas** by default
+(``stroke_scale="auto"``, ``min(width, height) / 512``): the annotators draw 4 px stick half-widths, radius-4 joints,
+2 px hand lines and radius-3 face dots at a 512 px working resolution and resize the result to the output size, so
+their strokes grow and shrink with it, below 1 on a canvas under 512 px too. A number fixes the factor
+(``stroke_scale=1`` draws the annotator's pixel sizes at any canvas size); hand lines never go below 1 px.
 """
 
 from __future__ import annotations
@@ -243,26 +249,28 @@ def _people_arrays(
 _MAX_COORD = 1e6
 
 
-def _confident(points: np.ndarray, min_score: float) -> np.ndarray:
-    """Mask of points that are drawn: finite, sane coordinates and a score at or above *min_score*."""
+def _confident(points: np.ndarray, min_score: float, *, strict: bool = False) -> np.ndarray:
+    """Mask of points that are drawn: finite, sane coordinates and a score at or above *min_score* (strictly above
+    with *strict*, the annotator's rule for body joints)."""
     xy = np.nan_to_num(points[:, :2], nan=np.inf)
     placed = (np.abs(xy) < _MAX_COORD).all(axis=1)
-    return placed & (np.nan_to_num(points[:, 2], nan=-1.0) >= min_score)
+    score = np.nan_to_num(points[:, 2], nan=-1.0)
+    return placed & (score > min_score if strict else score >= min_score)
 
 
 def _drawn_points(arrays: list[np.ndarray], options: RenderOptions) -> np.ndarray:
     """Every point the options would draw, in source coordinates (for ``fit="skeleton"``)."""
     out: list[np.ndarray] = []
     for kp in arrays:
-        parts: list[np.ndarray] = []
+        parts: list[tuple[np.ndarray, bool]] = []
         if options.body:
-            parts.append(to_openpose18(kp))
+            parts.append((to_openpose18(kp), True))
         if options.hands:
-            parts += [kp[LEFT_HAND], kp[RIGHT_HAND]]
+            parts += [(kp[LEFT_HAND], False), (kp[RIGHT_HAND], False)]
         if options.face:
-            parts.append(kp[FACE])
-        for p in parts:
-            out.append(p[_confident(p, options.min_score)])
+            parts.append((kp[FACE], False))
+        for p, strict in parts:
+            out.append(p[_confident(p, options.min_score, strict=strict)])
     return np.concatenate(out) if out else np.zeros((0, 3))
 
 
@@ -320,10 +328,10 @@ def _fill_disc(canvas: np.ndarray, centre: tuple[float, float], radius: float, c
 
 def _draw_body(canvas: np.ndarray, people: list[np.ndarray], min_score: float, k: float) -> None:
     bodies = [to_openpose18(kp) for kp in people]
-    oks = [_confident(b, min_score) for b in bodies]
+    oks = [_confident(b, min_score, strict=True) for b in bodies]
     stick = STICK_WIDTH * k
-    for body, ok in zip(bodies, oks, strict=True):
-        for i, (a, b) in enumerate(OPENPOSE_LIMBS):
+    for i, (a, b) in enumerate(OPENPOSE_LIMBS):  # limb by limb, every person: the annotator's order
+        for body, ok in zip(bodies, oks, strict=True):
             if not (ok[a] and ok[b]):
                 continue
             (xa, ya), (xb, yb) = body[a, :2], body[b, :2]
@@ -338,8 +346,8 @@ def _draw_body(canvas: np.ndarray, people: list[np.ndarray], min_score: float, k
             )
     # Dim the limb layer. Truncation, as an 8-bit multiply-and-cast does.
     canvas[:] = (canvas.astype(np.float64) * LIMB_DIM).astype(np.uint8)
-    for body, ok in zip(bodies, oks, strict=True):
-        for j in range(len(body)):
+    for j in range(len(OPENPOSE_COLORS)):  # joint by joint, every person
+        for body, ok in zip(bodies, oks, strict=True):
             if ok[j]:
                 _fill_disc(canvas, (body[j, 0], body[j, 1]), JOINT_RADIUS * k, OPENPOSE_COLORS[j])
 
@@ -403,11 +411,11 @@ def render_array(
     canvas = np.zeros((h, w, 3), dtype=np.uint8)
     if opts.body:
         _draw_body(canvas, mapped, opts.min_score, k)
-    for kp in mapped:
-        if opts.hands:
-            _draw_hand(canvas, kp[LEFT_HAND], opts.min_score, k)
-            _draw_hand(canvas, kp[RIGHT_HAND], opts.min_score, k)
-        if opts.face:
+    if opts.hands:  # every left hand, then every right hand, as the annotator stacks them
+        for hand in [kp[LEFT_HAND] for kp in mapped] + [kp[RIGHT_HAND] for kp in mapped]:
+            _draw_hand(canvas, hand, opts.min_score, k)
+    if opts.face:
+        for kp in mapped:
             _draw_face(canvas, kp[FACE], opts.min_score, k)
     return canvas
 
@@ -434,7 +442,8 @@ def render_pose(
     alone keeps the source aspect), else the source size. *fit* maps the source frame onto it (see the module
     docstring; *margin* applies to ``"skeleton"`` only). *stroke_scale* multiplies every line width and radius;
     ``"auto"`` is ``min(width, height) / 512``. *primary_only*, *fit*, *margin* and *stroke_scale* default to the
-    *options* fields of the same name; a value given here overrides the option.
+    *options* fields of the same name; a value given here overrides the option. ``stroke_scale`` defaults to
+    ``"auto"``.
     """
     return Image.fromarray(
         render_array(

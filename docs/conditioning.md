@@ -22,15 +22,24 @@ annotator code is used.
 
 | Part | How it is drawn |
 |---|---|
-| Body | The 133 whole-body keypoints are converted to OpenPose's 18 joints; the neck, which the whole-body layout lacks, is the midpoint of the shoulders, scored as the lower of the two. Each of the 17 limbs whose two joints are both confident is a filled ellipse along the limb: semi-major half the limb length, semi-minor 4 px, in that limb's colour. When every limb is drawn, the limb layer is dimmed to 60 %. Each confident joint is then a radius-4 dot in its own colour at full intensity. The 18 colours run around the hue wheel from red (neck to right shoulder; the nose) to pink. |
-| Hands | Per hand, 20 edges from the wrist out along each finger, each a 2 px line in its own hue (edge *i* of 20 is `hsv(i/20, 1, 1)`), then a radius-4 blue dot on each confident point. |
-| Face | Each confident face landmark (all 68) is a white radius-3 dot. |
+| Body | The 133 whole-body keypoints are converted to OpenPose's 18 joints; the neck, which the whole-body layout lacks, is the midpoint of the shoulders, scored as the lower of the two. Each of the 17 limbs whose two joints are both visible is a filled ellipse along the limb: semi-major half the limb length, semi-minor 4 px, in that limb's colour. When every limb is drawn, the limb layer is dimmed to 60 %. Each visible joint is then a radius-4 dot in its own colour at full intensity. The 18 colours run around the hue wheel from red (neck to right shoulder; the nose) to pink. |
+| Hands | Per hand, 20 edges from the wrist out along each finger, each a 2 px line in its own hue (edge *i* of 20 is `hsv(i/20, 1, 1)`), then a radius-4 blue dot on each visible point. |
+| Face | Each visible face landmark (all 68) is a white radius-3 dot. |
 | Feet | Not drawn (the convention has no feet). |
 
-Draw order is body limbs, the dimming, body joints, then each person's hands and face; later shapes overwrite
-earlier ones, nothing is blended. Shapes have hard (aliased) edges as the annotators draw them, so every pixel is
-black or one of the convention's colours. A point is drawn only when its score is at least `min_score` (default
-0.3) and its coordinates are finite; anything off the canvas is clipped.
+Pixel sizes are at the annotator's 512 px working resolution; see [sizing](#sizing-and-aspect) for how they scale.
+
+**Visibility** is the DWPose annotator's: a body joint is visible when its score is **strictly above** `min_score`
+(default 0.3), so the synthesised neck appears only when both shoulders are above it; a hand or face point when its
+score is **at or above** it. A point with a non-finite coordinate, or one more than 10^6 px from the origin, is never
+drawn; anything off the canvas is clipped.
+
+**Draw order** across people is also the annotator's: limb 0 of every person, then limb 1 of every person, up to
+limb 16; the dimming; joint 0 of every person, up to joint 17; then every person's left hand, then every right hand
+(each hand's edges, then its dots); then every face. Where two people overlap, the higher limb or joint index wins
+whichever person is listed first, and a face dot lands on top of any hand. Later shapes overwrite earlier ones,
+nothing is blended. Shapes have hard (aliased) edges as the annotators draw them, so every pixel is black or one of
+the convention's colours.
 
 ### Options
 
@@ -42,10 +51,10 @@ black or one of the convention's colours. A point is drawn only when its score i
 | `hands` | true | Draw both hands. |
 | `face` | true | Draw the face landmarks. |
 | `width`, `height` | source size | Canvas size. Give one alone to keep the source aspect ratio. |
-| `min_score` | 0.3 | Points below this score are not drawn; a limb needs both its joints. |
+| `min_score` | 0.3 | Visibility threshold: body joints need a score above it, hand and face points at or above it; a limb needs both its joints. |
 | `fit` | `contain` | How the source frame maps onto a canvas of another shape (see below). |
 | `primary_only` | false | Draw only the primary subject instead of every person. |
-| `stroke_scale` | 1.0 | Multiplies every stroke width and radius; `"auto"` is `min(width, height) / 512` (see below). |
+| `stroke_scale` | `"auto"` | Multiplies every stroke width and radius; `"auto"` is `min(width, height) / 512`, a number fixes the factor (see below). |
 | `margin` | 0.05 | `fit="skeleton"` only: the fraction of each side kept clear. |
 
 The render functions also take `fit`, `margin`, `stroke_scale` and `primary_only` as keyword arguments, which
@@ -67,19 +76,39 @@ Keypoints are in the source image's pixel frame. The canvas is the source size u
 | `stretch` | Separate x and y scales; distorts the skeleton when the aspect ratios differ. |
 | `skeleton` | Ignore the source frame: fit the drawn points' bounding box into the canvas inside a margin (default 5 % of each side), uniformly scaled and centred. Library batches use this. |
 
-**Stroke widths are fixed pixel sizes** (4 px limb half-width, radius-4 joints, 2 px hand lines, radius-3 face
-dots) whatever the canvas size, as the annotators draw at their working resolution. The annotators usually draw
-at a ~512 px detection resolution and the result is resized up to the generation size, so their strokes look
-proportionally thicker on large canvases. To mimic that, pass `stroke_scale="auto"` (`min(width, height) / 512`)
-or any positive factor. Render at the generation resolution (e.g. 1024 x 1024 for SDXL) rather than resizing a
-small control image afterwards, which would blur the hard edges.
+**Stroke widths scale with the canvas.** The annotators resize the photo to a 512 px working resolution, draw 4 px
+limb half-widths, radius-4 joints, 2 px hand lines and radius-3 face dots there, and resize the drawing to the output
+size, so their strokes are proportional to the canvas. The default `stroke_scale="auto"` reproduces that with a
+factor of `min(width, height) / 512`: twice the 512 px sizes on a 1024 x 1024 SDXL canvas, and less than them on a
+canvas under 512 px, where the reference shrinks too (hand lines stay at least 1 px). A number fixes the factor;
+`stroke_scale=1` draws the 512 px sizes on any canvas. Render at the generation resolution (e.g. 1024 x 1024 for
+SDXL) rather than resizing a small control image afterwards, which would blur the hard edges.
+
+### Checked against the reference, and the known deviations
+
+The renderer was checked against the DWPose annotator's drawing rules **read as source text** (colours, limb and
+hand-edge lists, shapes, widths, radii, the dimming, visibility thresholds, draw order and resolution handling), not
+by pixel-comparing its output; the tests pin each rule. Known, small deviations that remain:
+
+- **Ellipse rasterisation.** The annotator truncates the ellipse centre, half-length and angle to integers before
+  polygonising it (`cv2.ellipse2Poly` at 1 degree steps); puppet fills the exact rotated ellipse. Edges differ by
+  up to about a pixel.
+- **Line caps.** The annotator's 2 px hand lines have round caps (OpenCV); puppet's (Pillow) are square. Visible only
+  at the finger tips, under the dots.
+- **Resizing.** The annotator draws at 512 px and resizes with bilinear interpolation, which softens edges and adds
+  in-between shades; puppet draws at the output size with hard edges, so the output holds only convention colours.
+  At large canvases the reference's strokes look slightly blockier; thickness agrees to within the interpolation
+  blur.
+- **The near-origin test for hands and face.** The annotator marks hidden hand and face points with -1 and then skips
+  any point within 1 % of the image's left or top edge; puppet skips only points below the score threshold, so a
+  genuine hand or face point hugging those edges is drawn here and dropped there.
 
 ```python
 from argus_puppet.models import PoseResult, RenderOptions
 from argus_puppet.render import render_png
 
 result = PoseResult.model_validate_json(open("photo.pose.json").read())
-png = render_png(result, RenderOptions(width=1024, height=1024, face=False, stroke_scale="auto"))
+png = render_png(result, RenderOptions(width=1024, height=1024, face=False))   # strokes scale with the canvas
 ```
 
 ## The pose library

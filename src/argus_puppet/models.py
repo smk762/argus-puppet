@@ -501,7 +501,11 @@ class RenderOptions(BaseModel):
     face: bool = Field(True, description="Draw the face landmarks.")
     width: int | None = Field(None, ge=1, le=8192, description="Output width; default the source image's.")
     height: int | None = Field(None, ge=1, le=8192, description="Output height; default the source image's.")
-    min_score: Unit = Field(0.3, description="Points below this score are not drawn.")
+    min_score: Unit = Field(
+        0.3,
+        description="Visibility threshold, as the DWPose annotator applies it: a body joint is drawn when its score is "
+        "above this (the synthesised neck only when both shoulders are), a hand or face point at or above it.",
+    )
     fit: Fit = Field(
         "contain",
         description="How the source frame maps onto a canvas of another shape: 'contain' (letterbox, the default), "
@@ -510,9 +514,10 @@ class RenderOptions(BaseModel):
     )
     primary_only: bool = Field(False, description="Draw only the primary person (default: everyone).")
     stroke_scale: Annotated[float, Field(gt=0.0, le=64.0)] | Literal["auto"] = Field(
-        1.0,
-        description="Multiplies every line width and radius; 'auto' is min(width, height) / 512, as the annotators' "
-        "~512 px working resolution looks once resized.",
+        "auto",
+        description="Multiplies every line width and radius. 'auto' (the default) is min(width, height) / 512: the "
+        "annotators draw at a 512 px working resolution and resize to the output, so their strokes scale with the "
+        "canvas (below 1 under 512 px). 1 draws the annotator's pixel sizes at any canvas size.",
     )
     margin: float = Field(
         0.05, ge=0.0, lt=0.5, description="fit='skeleton' only: the fraction of each side kept clear on every edge."

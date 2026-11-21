@@ -426,7 +426,9 @@ def render(
     height: int | None = Option(None, "--height", min=1, max=8192, help="Canvas height (default: the source's)"),
     fit: str = Option("contain", "--fit", help=f"How the source frame maps onto the canvas: {', '.join(FITS)}"),
     primary_only: bool = Option(False, "--primary-only", help="Draw only the primary person"),
-    stroke_scale: str = Option("1", "--stroke-scale", help="Stroke width factor, or 'auto' (min side / 512)"),
+    stroke_scale: str = Option(
+        "auto", "--stroke-scale", help="Stroke width factor, or 'auto' (min side / 512, the annotators' scaling)"
+    ),
     min_score: float = Option(0.3, "--min-score", help="Points scoring below this are not drawn"),
     recursive: bool = Option(False, "--recursive", "-r", help="With a folder: include subfolders"),
     write_sidecar: bool = Option(False, "--write-sidecar", help="Save the sidecar of any image posed here"),
