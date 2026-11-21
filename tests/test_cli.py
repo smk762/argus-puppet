@@ -93,6 +93,18 @@ def test_pose_reports_unwritable_sidecars_and_exits_non_zero(monkeypatch, tmp_pa
     assert (tmp_path / "b.pose.json").is_file()
 
 
+def test_pose_with_an_invalid_gpu_coordinator_fails_cleanly(monkeypatch, tmp_path, cuda) -> None:
+    from argus_puppet import gpu
+
+    _fake_estimator(monkeypatch)
+    monkeypatch.setenv("ARGUS_GPU_COORDINATOR", "bogus")
+    monkeypatch.setattr(gpu, "_coordinator", None)
+    (tmp_path / "a.png").write_bytes(draw_image())
+    result = runner.invoke(app, ["pose", str(tmp_path)])
+    assert result.exit_code == 1 and "ARGUS_GPU_COORDINATOR" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_pose_refuses_bad_settings_and_missing_models(monkeypatch, tmp_path) -> None:
     (tmp_path / "a.png").write_bytes(draw_image())
     result = runner.invoke(app, ["pose", str(tmp_path), "--detector", "nope"])

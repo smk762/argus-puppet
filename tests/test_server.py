@@ -13,7 +13,7 @@ import pytest
 from conftest import FakeEstimator, RecordingCoordinator, asgi_request, draw_image, megabytes
 from fastapi.testclient import TestClient
 
-from argus_puppet import registry, runtime
+from argus_puppet import gpu, registry, runtime
 from argus_puppet.config import Settings
 from argus_puppet.models import Health, PoseResult, ScanSummary
 from argus_puppet.server.app import SCAN_JSON_BYTES, create_app, parse_face_hint
@@ -149,6 +149,17 @@ def test_a_refused_lease_is_503_retry_after(settings, fake, cuda) -> None:
     )
     reply = _post(client, draw_image())
     assert reply.status_code == 503 and reply.headers["retry-after"]
+
+
+def test_an_invalid_gpu_coordinator_is_503_as_health_reports_it(settings, fake, cuda, monkeypatch) -> None:
+    monkeypatch.setenv("ARGUS_GPU_COORDINATOR", "bogus")
+    monkeypatch.setattr(gpu, "_coordinator", None)
+    client = TestClient(create_app(settings, estimator=fake), raise_server_exceptions=False)
+    assert client.get("/health").json()["gpu_coordinator"] == "invalid"
+    reply = _post(client, draw_image())
+    assert reply.status_code == 503, reply.text
+    assert "ARGUS_GPU_COORDINATOR" in reply.json()["detail"] and "retry-after" not in reply.headers
+    assert fake.calls == 0
 
 
 def test_calls_past_the_concurrency_cap_are_refused(settings) -> None:

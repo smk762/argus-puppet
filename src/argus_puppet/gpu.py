@@ -60,12 +60,22 @@ _coordinator: GpuCoordinator | None = None
 _coordinator_lock = threading.Lock()
 
 
+class CoordinatorInvalid(RuntimeError):
+    """``ARGUS_GPU_*`` names no usable coordinator (``GET /health`` reports ``invalid``): an operator's fix, not a
+    busy GPU, so it is not one of :data:`LEASE_ERRORS`."""
+
+
 def default_coordinator() -> GpuCoordinator:
-    """The host-wide coordinator from ``ARGUS_GPU_*``, built once."""
+    """The host-wide coordinator from ``ARGUS_GPU_*``, built once. Raises :class:`CoordinatorInvalid`."""
     global _coordinator
     with _coordinator_lock:
         if _coordinator is None:
-            _coordinator = coordinator_from_env()
+            try:
+                _coordinator = coordinator_from_env()
+            except ValueError as exc:
+                raise CoordinatorInvalid(
+                    f"the GPU coordinator is misconfigured (ARGUS_GPU_COORDINATOR): {exc}"
+                ) from exc
         return _coordinator
 
 

@@ -119,6 +119,8 @@ def pose(
         raise fail(str(exc)) from None
     except gpu.LEASE_ERRORS as exc:
         raise fail(f"no GPU lease: {exc}") from None
+    except gpu.CoordinatorInvalid as exc:
+        raise fail(str(exc)) from None
     if as_json:
         typer.echo(summary.model_dump_json(indent=2))
     else:
@@ -172,6 +174,8 @@ def _run_extraction(folder: Path, *, recursive: bool, settings: Settings) -> Non
         raise fail(str(exc)) from None
     except gpu.LEASE_ERRORS as exc:
         raise fail(f"no GPU lease: {exc}") from None
+    except gpu.CoordinatorInvalid as exc:
+        raise fail(str(exc)) from None
     failed = sum(summary.failed.values())
     typer.echo(f"extracted: {summary.written} sidecar(s) written, {failed} image(s) failed", err=True)
 
@@ -486,7 +490,7 @@ def render(
 
                     extract.write_sidecar(pose, sidecar_path(path))
             png = render_png(pose, options)
-        except (runtime.ModelUnavailable, *gpu.LEASE_ERRORS) as exc:
+        except (runtime.ModelUnavailable, gpu.CoordinatorInvalid, *gpu.LEASE_ERRORS) as exc:
             raise fail(str(exc)) from None
         except (sidecars.SidecarError, ValueError, OSError) as exc:
             typer.echo(f"failed {path}: {exc}", err=True)

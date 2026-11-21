@@ -290,6 +290,7 @@ Other 503s carry a different meaning:
 | `busy: try again` (with `Retry-After: 1`) | Over the admission bound | Retry |
 | `GPU busy: ...` (with `Retry-After: 5`) | The GPU lease was refused or timed out (argus-iris or the host lease) | Retry later |
 | `Model ... not found ...`, `... does not match its pinned SHA-256 ...`, `onnxruntime is not installed ...` | The service cannot run a model | Operator: `argus-puppet models fetch` / `verify`, or install an ONNX Runtime extra. Retrying will not help |
+| `the GPU coordinator is misconfigured (ARGUS_GPU_COORDINATOR) ...` | `ARGUS_GPU_COORDINATOR` names no coordinator; `GET /health` reports `gpu_coordinator: invalid`. Only on CUDA, where a lease is needed | Operator: fix the variable (`none`, `lease` or `broker`). Retrying will not help |
 
 ## Security model
 

@@ -165,6 +165,8 @@ def model_errors(exc: Exception) -> HTTPException:
         return HTTPException(503, str(exc))
     if isinstance(exc, gpu.LEASE_ERRORS):
         return HTTPException(503, f"GPU busy: {exc}", headers={"Retry-After": str(GPU_RETRY_S)})
+    if isinstance(exc, gpu.CoordinatorInvalid):  # /health reports it as "invalid"; no Retry-After: retrying won't help
+        return HTTPException(503, str(exc))
     raise exc
 
 
@@ -242,7 +244,7 @@ def health(state: AppState) -> Health:
     est = state.fixed_estimator or estimator_mod.get_estimator(settings)
     try:
         coordinator = (state.coordinator or gpu.default_coordinator()).name
-    except ValueError:  # an unknown ARGUS_GPU_COORDINATOR: leases would fail the same way
+    except gpu.CoordinatorInvalid:  # an unknown ARGUS_GPU_COORDINATOR: leases fail the same way (503)
         coordinator = "invalid"
     return Health(
         version=__version__,
