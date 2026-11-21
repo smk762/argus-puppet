@@ -36,7 +36,8 @@ torso units; an anchor shoulder setting the scale of a foreshortened torso moved
 
 1. confident: used as it is;
 2. below `min_joint_score` but scoring at least 0.1 (`ANCHOR_MIN_SCORE`): its coordinate is still used for the
-   centre and scale (the estimator still placed it), while the joint stays **masked** as a compared joint;
+   centre and scale (the estimator still placed it), while the joint stays **masked** as a compared joint. This only
+   completes a pair whose other joint is confident: a doubtful joint never makes a pose usable on its own;
 3. missing altogether (score under 0.1, or unplaced) while the other pair is whole: estimated from it. A missing hip
    is the present hip plus 0.7 times the shoulder vector on that side (`HIP_TO_SHOULDER_WIDTH`: adult hip keypoints
    sit 0.45-0.55 torso lengths apart, shoulder keypoints about 0.7), a missing shoulder the present shoulder plus
@@ -75,7 +76,8 @@ not count as a wrist at the hip.
 
 `embed()` returns `None` (the image is not usable) when:
 
-- no hip or no shoulder can anchor it (none scoring 0.1 or more; there is nothing to centre or scale on);
+- no hip or no shoulder is confident (there is no anchor to centre or scale on; rules 2 and 3 above only complete a
+  pair);
 - the scale `S` is under 4 pixels (noise, not a person);
 - fewer than `min_usable_joints` (default 8) body joints are confident. Eight admits an upper-body shot with the
   hips in frame (head 5 + shoulders 2 + hips 2 = 9 before any limb) and refuses a head-and-shoulders portrait.

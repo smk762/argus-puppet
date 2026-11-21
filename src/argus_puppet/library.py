@@ -33,6 +33,8 @@ import structlog
 from PIL import Image
 
 from argus_puppet.age import ADULT_AGE, AgeEstimator, AgeUnavailable
+from argus_puppet.compare import DEFAULT_CLOSE_THRESHOLD
+from argus_puppet.embedding import CORE_JOINTS, PoseVector, embed, mirror
 from argus_puppet.labels import pose_labels
 from argus_puppet.metrics import (
     DEFAULT_PARAMS,
@@ -64,6 +66,7 @@ __all__ = [
     "Labeler",
     "build_library",
     "default_clusterer",
+    "dedupe_matrix",
     "default_distance_matrix",
     "entry_from_result",
     "entry_id",
@@ -81,13 +84,14 @@ Clusterer = Callable[[np.ndarray], Sequence[int | None]]
 
 # A primary person whose mean body-joint score is below this is not a usable pose.
 DEFAULT_MIN_BODY_SCORE = 0.3
-# Poses closer than this collapse to the best-scored one. The library's "same pose" is the comparison's
-# "memorised" (compare.DEFAULT_MEMORISATION_THRESHOLD), so the suite has one definition: re-estimating one pose sits
-# at a median 0.04 and a 99th percentile 0.09 on the synthetic generators, the two closest *distinct* presets
-# (standing vs hands on hips) 0.12 apart. 0.08 removes nearly every re-estimated copy (a burst of frames, the same
-# photo at two sizes) and stays a third below the closest distinct pair, so no real pose variety is thrown away;
-# the rare copy that survives just costs one extra entry. See docs/conditioning.md.
-DEFAULT_DEDUPE_THRESHOLD = 0.08
+# Poses closer than this, over the whole limb skeleton, collapse to the best-scored one. The library's "same pose" is
+# the comparison's close pose match (compare.DEFAULT_CLOSE_THRESHOLD), so the suite has one definition. Measured on
+# 60 synthetic poses plus two re-estimated copies of 20 of them: every copy with 0.01 torso units of joint noise and
+# three in four with 0.02 are removed, while poses of distinct people in one stance with 8-10 degrees of limb
+# variation are kept (at most 1 of 60 lost); 0.08 dropped 17 of 60 broad-mix poses and 52 of 60 same-stance ones.
+# Below ~5 degrees of variation two people's poses are indistinguishable from a re-estimated copy and the dedupe
+# merges them. See docs/conditioning.md.
+DEFAULT_DEDUPE_THRESHOLD = DEFAULT_CLOSE_THRESHOLD
 
 
 def default_distance_matrix(poses: Sequence[np.ndarray]) -> np.ndarray:
@@ -151,6 +155,9 @@ class LibraryBuild:
     considered: int = 0
     no_person: int = 0  # no primary person
     low_score: int = 0  # primary person below min_body_score
+    unembeddable: int = (
+        0  # primary person the pose vector cannot use under the default params (no anchor, too few joints)
+    )
     duplicate_ids: int = 0  # the same image (and pose) seen twice
     under_age: int = 0  # age check on: a face or body read under 18
     age_unchecked: int = 0  # age check on: the check could not vouch for the image (fails closed)
@@ -198,17 +205,22 @@ def build_library(
     seed: int | None = None,
     age_gate: AgeGate | None = None,
 ) -> LibraryBuild:
-    """Build a library from pose results: one entry per image's usable primary person, labelled by *labeler*.
+    """Build a library from pose results: one entry per image's usable primary person, labelled by *labeler*. A
+    primary person is usable when their mean body score is at least *min_body_score* and the pose vector can embed
+    them under the default metric params (``unembeddable`` counts the ones it cannot: no hip or shoulder to anchor
+    on, or too few confident joints; such a pose could never be compared, deduplicated or clustered).
 
     Then, in order: entries with the same id (same image, same pose) collapse to the first; with *age_gate*, every
     remaining image goes through the age check and is kept only when it passes (failing closed, see the module
-    docstring); with *dedupe_threshold*, poses closer than it to a better-scored kept pose are dropped (best mean
-    body score wins); with *clusterer*, each entry gets a cluster id; with *max_entries*, a diverse subset of that
-    size is kept by farthest-point sampling, stratified by cluster (deterministic, or seeded with *seed*). Entries
+    docstring); with *dedupe_threshold*, poses closer than it to a better-scored kept pose, over the whole limb
+    skeleton (:func:`dedupe_matrix`), are dropped (best mean body score wins); with *clusterer*, each entry gets a cluster id; with *max_entries*, a diverse subset of that
+    size is kept by farthest-point sampling, stratified by cluster (deterministic, or seeded with *seed*). The distance
+    steps see the entries sorted by source image and id, so the result does not depend on the input order; entries
     keep input order. *distance_matrix* defaults to :func:`default_distance_matrix`; it is only computed when a step
     needs it. ``library.age_checked`` records whether the age check ran.
     """
     pairs: list[tuple[PoseResult, PoseLibraryEntry]] = []
+    vectors: list[PoseVector] = []
     seen: set[str] = set()
     build = LibraryBuild(library=PoseLibrary(created_from=created_from))
     all_results: list[PoseResult] = []
@@ -221,6 +233,10 @@ def build_library(
         entry = entry_from_result(result, min_body_score=min_body_score, labeler=labeler)
         if entry is None:
             build.low_score += 1
+            continue
+        vector = _embed(entry.keypoints_array())
+        if vector is None:
+            build.unembeddable += 1
             continue
         if entry.id in seen:
             build.duplicate_ids += 1
@@ -237,16 +253,21 @@ def build_library(
                 continue
             build.age_passed += 1
         pairs.append((result, entry))
+        vectors.append(vector)
 
-    entries = [e for _, e in pairs]
-    quality = [r.primary_person.part_scores.body for r, _ in pairs]  # type: ignore[union-attr]
+    # The distance steps see the entries in a canonical order (by source image, then id) so that ties in the dedupe,
+    # the clustering and the sampling never depend on the order the results arrived in; entries keep input order.
+    order = sorted(range(len(pairs)), key=lambda i: (pairs[i][1].source_image, pairs[i][1].id))
+    entries = [pairs[i][1] for i in order]
+    quality = [pairs[i][0].primary_person.part_scores.body for i in order]  # type: ignore[union-attr]
+    vectors = [vectors[i] for i in order]
     needs_distance = dedupe_threshold is not None or clusterer is not None or max_entries is not None
     if entries and needs_distance:
         dist_fn = distance_matrix or default_distance_matrix
         d = _checked_matrix(dist_fn([e.keypoints_array() for e in entries]), len(entries))
         keep = list(range(len(entries)))
         if dedupe_threshold is not None:
-            keep = deduplicate(d, dedupe_threshold, quality=quality)
+            keep = deduplicate(dedupe_matrix(d, vectors), dedupe_threshold, quality=quality)
             build.near_duplicates = len(entries) - len(keep)
             build.dropped += [entries[i].source_image for i in sorted(set(range(len(entries))) - set(keep))]
         sub = d[np.ix_(keep, keep)]
@@ -263,6 +284,8 @@ def build_library(
             build.dropped += [e.source_image for i, e in enumerate(entries) if i not in picked]
             entries = [e for i, e in enumerate(entries) if i in picked]
 
+    position = {e.id: i for i, (_, e) in enumerate(pairs)}
+    entries.sort(key=lambda e: position[e.id])  # back to input order
     build.library = PoseLibrary(
         created_from=created_from,
         estimator=shared_estimator(all_results),
@@ -275,6 +298,7 @@ def build_library(
         entries=len(entries),
         no_person=build.no_person,
         low_score=build.low_score,
+        unembeddable=build.unembeddable,
         duplicate_ids=build.duplicate_ids,
         age_check=age_gate is not None,
         under_age=build.under_age,
@@ -283,6 +307,25 @@ def build_library(
         sampled_out=build.sampled_out,
     )
     return build
+
+
+def _embed(keypoints: np.ndarray) -> PoseVector | None:
+    return embed(
+        keypoints, min_joint_score=DEFAULT_PARAMS.min_joint_score, min_usable_joints=DEFAULT_PARAMS.min_usable_joints
+    )
+
+
+def dedupe_matrix(
+    d: np.ndarray, vectors: Sequence[PoseVector], min_close_joints: int = DEFAULT_PARAMS.min_close_joints
+) -> np.ndarray:
+    """*d* with every pair that shares fewer than *min_close_joints* of the 12 non-head joints set to NaN (never a
+    duplicate). With the default 12 a duplicate needs both poses to show the whole limb skeleton, so a pose dropped as
+    a duplicate of a kept one was compared over the same joints as every other pose that pose absorbed."""
+    core = list(CORE_JOINTS)
+    c = np.stack([v.mask[core] for v in vectors]).astype(np.int64)
+    cf = np.stack([mirror(v.coords, v.mask)[1][core] for v in vectors]).astype(np.int64)
+    shared = np.maximum(c @ c.T, c @ cf.T)
+    return np.where(shared >= min_close_joints, d, np.nan)
 
 
 def _checked_matrix(d: np.ndarray, n: int) -> np.ndarray:

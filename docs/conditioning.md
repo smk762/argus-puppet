@@ -95,15 +95,25 @@ cluster id, and its provenance: the source image's name and SHA-256.
    which image each pose came from, and that image stays the pose's origin.
 2. **Extract poses** with the estimator, producing a `.pose.json` sidecar per image.
 3. **Build** from the sidecars. Each image contributes its primary person if their mean body-joint score is at
-   least `min_body_score` (default 0.3); images with nobody usable are skipped. Each entry is labelled (stance,
-   arms, facing; `labels.pose_labels`). Entry ids are derived from the source image's hash and the keypoints, so
-   rebuilding from the same inputs gives the same ids.
+   least `min_body_score` (default 0.3) and the pose vector can embed them under the default metric params (a
+   confident hip and shoulder to anchor on and 8 confident body joints; see
+   [pose-vector.md](pose-vector.md#unusable-poses)). A pose the vector cannot embed could never be compared,
+   deduplicated or clustered, so it would sit in a cluster of its own and stratified sampling would favour it; such
+   images are counted as `unembeddable` and skipped, as are images with nobody usable. Each entry is labelled
+   (stance, arms, facing; `labels.pose_labels`). Entry ids are derived from the source image's hash and the
+   keypoints, so rebuilding from the same inputs gives the same ids.
 4. **Age check** (optional, `age_gate`; on with real-person sources): see below.
-5. **Deduplicate** (`dedupe_threshold`, default 0.08; `None` turns it off): a pose closer than the threshold to a
-   better-scoring pose already kept is dropped, so bursts of near-identical frames collapse to their best one.
+5. **Deduplicate** (`dedupe_threshold`, default 0.04; `None` turns it off): a pose closer than the threshold to a
+   better-scoring pose already kept is dropped, so bursts of near-identical frames collapse to their best one. Two
+   poses can only be duplicates when they share all 12 non-head joints (`MetricParams.min_close_joints`): a waist-up
+   frame is never a duplicate of a full-body one, and a pose can only absorb others it was compared with over the
+   whole limb skeleton.
 6. **Cluster** (default: average linkage at the metrics' 0.25 cut; `clusterer=None` turns it off): each entry gets
    a cluster id, used to stratify sampling.
 7. **Cap** (optional, `max_entries`): keep a diverse subset of that size (see below).
+
+Steps 5 to 7 see the entries sorted by source image and id, so the library does not depend on the order the sidecars
+were read in; the entries keep their input order.
 
 ```python
 from argus_puppet.library import build_library, save_library
@@ -119,15 +129,25 @@ atomically with sorted keys, so it diffs cleanly and a crash never leaves a half
 
 The pose distance used for deduplication, clustering and sampling is the suite's mirror-invariant pose distance
 (`metrics.keypoint_distance_matrix`, in torso units; see [pose-vector.md](pose-vector.md)), so a pose and its mirror
-image count as the same pose. A pose the distance cannot use (too few confident joints) is never a duplicate and
-sits in a cluster of its own. Each step takes a replacement callable (`distance_matrix`, `labeler`, `clusterer`).
+image count as the same pose. Each step takes a replacement callable (`distance_matrix`, `labeler`, `clusterer`);
+the whole-skeleton rule of the dedupe applies to a replacement distance too.
 
-**Choosing 0.08.** The library's "same pose" is the comparison's "memorised" (see
-[metrics.md](metrics.md#the-memorisation-threshold)), so the suite has one definition. Re-estimating one pose sits
-at a median 0.04 and a 99th percentile 0.09 on the synthetic figures, and the two closest *distinct* presets
-(standing and hands on hips) are 0.12 apart. 0.08 removes nearly every re-estimated copy (a burst of frames, one
-photo at two sizes) and stays a third below the closest distinct pair, so no real pose variety is lost; the rare
-copy that survives costs one extra entry.
+**Choosing 0.04.** The library's "same pose" is the comparison's close pose match (see
+[metrics.md](metrics.md#the-close-threshold)), so the suite has one definition. On 60 synthetic poses plus two
+re-estimated copies (another scale and position, per-joint noise in torso units) of 20 of them:
+
+| threshold | copies left (0.01 noise) | copies left (0.02 noise) | broad mix lost (10 deg) | one stance lost (8 deg) | one stance lost (5 deg) |
+|---|---|---|---|---|---|
+| 0.03 | 2-4 of 40 | 21-24 of 40 | 0 of 60 | 0 of 60 | 3-4 of 60 |
+| **0.04** | **0 of 40** | **9-11 of 40** | **0 of 60** | **1 of 60** | **25-32 of 60** |
+| 0.05 | 0 of 40 | 3-6 of 40 | 0 of 60 | 5 of 60 | 42-51 of 60 |
+| 0.08 (before) | 0 of 40 | 0 of 40 | 17-18 of 60 | 52-53 of 60 | 57-58 of 60 |
+
+0.04 removes every copy re-estimated with a pixel or two of noise and three in four of the noisier ones, and keeps
+distinct people in one stance once their limbs differ by about 8 degrees. The trade-off: people in one stance whose
+limbs differ by 5 degrees or less are indistinguishable from re-estimated copies of each other in 2D, and the
+dedupe merges about half of them. A copy that survives only costs one extra entry, which the cluster stratification
+of sampling then down-weights, so the threshold errs on the side of keeping poses.
 
 ### The age check
 

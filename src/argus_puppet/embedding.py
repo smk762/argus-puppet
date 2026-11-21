@@ -90,7 +90,8 @@ MIN_SCALE_PX = 4.0
 # An anchor joint (hip or shoulder) below min_joint_score still places the centre and the scale when its score is at
 # least this: the estimator still put it somewhere sensible, and dropping it would move the centre by half a hip
 # width the moment its score dips under the threshold (0.23 torso units in a frontal view). It stays masked as a
-# compared joint. Below this floor its coordinate is treated as unplaced.
+# compared joint. Below this floor its coordinate is treated as unplaced. A doubtful joint only completes a pair whose
+# other joint is confident: a pose with no confident hip (or shoulder) is still unusable.
 ANCHOR_MIN_SCORE = 0.1
 # With the anchor joint gone altogether, it is estimated from the other pair: hip width ~ 0.7 x shoulder width. Adult
 # hip keypoints sit 0.45-0.55 torso lengths apart and shoulder keypoints ~0.7 (a ratio of 0.64-0.79); the error of
@@ -143,7 +144,8 @@ def confident(keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOINT_
 
 
 def _anchor_points(kp: np.ndarray, min_joint_score: float) -> dict[int, np.ndarray] | None:
-    """The four anchor joints (hips, shoulders) as the torso frame uses them, or ``None`` when it cannot be placed.
+    """The four anchor joints (hips, shoulders) as the torso frame uses them, or ``None`` when it cannot be placed:
+    without at least one confident hip and one confident shoulder.
 
     A joint is taken as it is when it is confident, or when its score is at least :data:`ANCHOR_MIN_SCORE` (a
     doubtful joint still marks where the body is). A joint missing below that is estimated from the other pair when
@@ -151,6 +153,9 @@ def _anchor_points(kp: np.ndarray, min_joint_score: float) -> dict[int, np.ndarr
     shoulder the present shoulder plus the hip vector / 0.7). Otherwise it is left out, and the one present joint of
     the pair stands in for its midpoint: right in profile, where the pair nearly coincides.
     """
+    ok = confident(kp, min_joint_score)
+    if not (ok[L_HIP] or ok[R_HIP]) or not (ok[L_SHOULDER] or ok[R_SHOULDER]):
+        return None  # a doubtful joint completes a pair; it never anchors a pose on its own
     floor = min(min_joint_score, ANCHOR_MIN_SCORE)
     usable = (kp[:, 2] >= floor) & _placed(kp)
     pts = {j: kp[j, :2].copy() for j in (L_HIP, R_HIP, L_SHOULDER, R_SHOULDER) if usable[j]}
@@ -181,14 +186,15 @@ def torso_frame(keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOIN
     The centre is the midpoint of the hips and the mid-shoulder the midpoint of the shoulders, read from the anchor
     joints of :func:`_anchor_points`: a hip or shoulder scoring under *min_joint_score* still anchors when it scores
     :data:`ANCHOR_MIN_SCORE` or more, and one missing altogether is estimated from the other pair when that pair is
-    whole. So a single anchor joint dipping under the threshold moves the vector by a few hundredths of a torso unit
+    whole. Both only ever complete a pair: a pose needs one confident hip and one confident shoulder to be placed at
+    all. So a single anchor joint dipping under the threshold moves the vector by a few hundredths of a torso unit
     rather than half a hip width. With one hip (or shoulder) and no way to estimate the other, that one joint is the
     midpoint: right in profile, where the pair nearly coincides. The scale is::
 
         max(|mid_shoulder - mid_hip|, 1.2 * shoulder_width, 1.5 * hip_width)
 
     with a width counted when both of its anchor joints are known. ``None`` without a hip and a shoulder to anchor
-    on, or when the scale is under :data:`MIN_SCALE_PX`.
+    on (no confident hip or no confident shoulder), or when the scale is under :data:`MIN_SCALE_PX`.
     """
     kp = _check(keypoints)
     pts = _anchor_points(kp, min_joint_score)

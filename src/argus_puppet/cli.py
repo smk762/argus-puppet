@@ -596,6 +596,7 @@ def library_build(
         "considered": build.considered,
         "no_person": build.no_person,
         "low_score": build.low_score,
+        "unembeddable": build.unembeddable,
         "duplicate_ids": build.duplicate_ids,
         "near_duplicates": build.near_duplicates,
         "sampled_out": build.sampled_out,
@@ -625,7 +626,8 @@ def _print_build(counts: dict) -> None:
 
     console = Console()
     table = Table(show_header=False, title="argus-puppet library build")
-    rows = ["entries", "considered", "no_person", "low_score", "duplicate_ids", "near_duplicates", "sampled_out"]
+    rows = ["entries", "considered", "no_person", "low_score", "unembeddable", "duplicate_ids", "near_duplicates"]
+    rows.append("sampled_out")
     rows.append("clusters")
     if counts["age_check"]:
         rows += ["age_passed", "under_age", "age_unchecked"]

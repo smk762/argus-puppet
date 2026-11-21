@@ -9,6 +9,7 @@ import pytest
 from synthetic_poses import STANDING_BODY, figure, result
 
 from argus_puppet.age import AgeUnavailable
+from argus_puppet.compare import DEFAULT_CLOSE_THRESHOLD
 from argus_puppet.library import (
     DEFAULT_DEDUPE_THRESHOLD,
     AgeGate,
@@ -137,7 +138,84 @@ def test_build_dedupes_to_one_per_pose_by_default() -> None:
     names = sorted(e.source_image.split("/")[0] for e in build.library.entries)
     assert names == sorted(POSES)
     assert build.near_duplicates == 12 and len(build.dropped) == 12
-    assert DEFAULT_DEDUPE_THRESHOLD == 0.08
+    assert DEFAULT_DEDUPE_THRESHOLD == DEFAULT_CLOSE_THRESHOLD == 0.04
+
+
+def _posegen_result(name: str, kp: np.ndarray):
+    import hashlib
+
+    import posegen
+
+    r = posegen.result(name, kp)
+    return r.model_copy(update={"image_sha256": hashlib.sha256(name.encode()).hexdigest()})
+
+
+def test_unembeddable_poses_are_rejected_and_counted() -> None:
+    # Regression: 30 head-and-shoulders frames (mean body score 0.52) were admitted, never deduplicated (NaN), each
+    # became its own cluster and took 5 of 20 samples.
+    import posegen
+    from test_metrics import NAMES, sample
+
+    rng = np.random.default_rng(60)
+    good = [
+        _posegen_result(r.image, r.people[0].keypoints_array()) for r in sample(rng, NAMES, 60, angle=10, prefix="g")
+    ]
+    portraits = []
+    for k in range(30):
+        kp = posegen.make("standing", rng=rng, angle_jitter=2, joint_noise=0.01)
+        kp[:17, 2] = 0.1
+        kp[:9, 2] = 0.9  # head, shoulders and elbows: no hip to anchor on
+        portraits.append(_posegen_result(f"p{k:03d}.png", kp))
+    build = build_library(good + portraits)
+    assert build.unembeddable == 30 and build.low_score == 0
+    assert not any(e.source_image.startswith("p") for e in build.library.entries)
+    capped = build_library(good + portraits, max_entries=25)
+    assert len(capped.library.entries) == 25 and capped.unembeddable == 30
+
+
+def test_dedupe_needs_the_whole_limb_skeleton() -> None:
+    import posegen
+
+    full = posegen.make("standing")
+    waist_up = posegen.make("standing", dropout=(13, 14, 15, 16))  # distance 0 to full, over 8 shared joints
+    no_arms = posegen.make("standing", dropout=(7, 8, 9, 10))
+    rs = [_posegen_result("a.png", waist_up), _posegen_result("b.png", full), _posegen_result("c.png", no_arms)]
+    build = build_library(rs)
+    assert build.near_duplicates == 0 and len(build.library.entries) == 3
+    # a and c share no limb joint, so they were never compared; b (kept, best scored) cannot absorb both
+    copies = [_posegen_result("d.png", full + [[1.0, 0.0, 0.0]]), _posegen_result("e.png", full)]
+    assert build_library(copies).near_duplicates == 1
+
+
+def test_dedupe_keeps_distinct_people_in_one_stance_and_drops_re_estimated_copies() -> None:
+    from test_metrics import sample
+
+    from argus_puppet.embedding import embed
+
+    rng = np.random.default_rng(60)
+    people = sample(rng, ["standing"], 60, angle=8, noise=0.03, prefix="g")
+    rs = [_posegen_result(r.image, r.people[0].keypoints_array()) for r in people]
+    for k, r in enumerate(people[:20]):
+        kp = r.people[0].keypoints_array()
+        kp[:23, :2] += rng.normal(0, 0.01 * embed(kp).scale_px, size=(23, 2))  # the same frame, re-estimated
+        rs.append(_posegen_result(f"z-copy{k:02d}.png", kp))
+    build = build_library(rs, labeler=None)
+    survivors = {e.source_image for e in build.library.entries}
+    assert sum(1 for s in survivors if s.startswith("z-copy")) <= 2
+    lost = [r.image for r in people if r.image not in survivors and f"z-copy{people.index(r):02d}.png" not in survivors]
+    assert len(lost) <= 2  # was 52 of 60 at the old 0.08
+
+
+def test_build_does_not_depend_on_the_input_order() -> None:
+    rs = results_with_duplicates()
+    rng = np.random.default_rng(4)
+    a = build_library(rs, max_entries=3)
+    for _ in range(4):
+        shuffled = [rs[i] for i in rng.permutation(len(rs))]
+        b = build_library(shuffled, max_entries=3)
+        key = lambda lib: sorted((e.id, e.cluster) for e in lib.entries)  # noqa: E731
+        assert key(b.library) == key(a.library)
+        assert [e.id for e in b.library.entries] == [r for r in (x.id for x in b.library.entries)]
 
 
 def test_build_labels_and_clusters_with_the_real_rules_by_default() -> None:

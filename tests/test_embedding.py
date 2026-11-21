@@ -76,6 +76,13 @@ def test_no_anchor_is_unusable(drop: tuple[int, ...]) -> None:
     assert embed(make("standing", dropout=drop)) is None
 
 
+def test_doubtful_anchor_joints_never_anchor_a_pose_on_their_own() -> None:
+    for pair in ((Joint.LEFT_HIP, Joint.RIGHT_HIP), (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)):
+        kp = make("standing")
+        kp[list(pair), 2] = 0.2  # both doubtful: above the anchor floor, below the joint threshold
+        assert embed(kp) is None and torso_frame(kp) is None
+
+
 def test_one_hip_and_one_shoulder_are_enough_to_anchor() -> None:
     assert embed(make("profile", dropout=(Joint.RIGHT_HIP, Joint.RIGHT_SHOULDER))) is not None
 

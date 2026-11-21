@@ -258,6 +258,9 @@ def test_library_build_and_sample(tmp_path) -> None:
     counts = json.loads(result.stdout)
     assert counts["considered"] == 6 and counts["entries"] == 5
     assert counts["duplicate_ids"] + counts["near_duplicates"] == 1  # the repeated standing pose
+    assert counts["unembeddable"] == 0
+    table = runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "lib2.json")])
+    assert table.exit_code == 0 and "unembeddable" in table.output
     lib = load_library(lib_path)
     assert len(lib.entries) == 5 and lib.age_checked is False
     assert all(e.cluster is not None for e in lib.entries)
