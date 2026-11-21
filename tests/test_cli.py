@@ -238,6 +238,39 @@ def test_stats_without_sidecars_fails_unless_extracting(monkeypatch, tmp_path) -
     assert fake.calls == 1 and (tmp_path / "a.pose.json").exists()
 
 
+def _legs_crop_sidecar(folder: Path, name: str = "zz_legs.png") -> None:
+    """A sidecar whose pose has hips and legs but nothing above the hips (unusable: no confident shoulder)."""
+    from posegen import make, result
+
+    from argus_puppet.extract import write_sidecar
+    from argus_puppet.models import sidecar_path
+
+    kp = make("standing")
+    kp[:11, 2] = 0.0
+    kp[11:17, 2] = 1.0  # mean body score 0.35: past the library's min_body_score, so embedding is what rejects it
+    write_sidecar(result(name, kp), sidecar_path(folder / name))
+
+
+def test_stats_compare_and_library_build_show_the_unusable_breakdown(tmp_path) -> None:
+    folder = _sidecar_folder(tmp_path / "set", SET)
+    clean = runner.invoke(app, ["stats", str(folder)])
+    assert clean.exit_code == 0 and "by reason" not in clean.output  # nothing unusable: no breakdown
+    _legs_crop_sidecar(folder)
+    stats = runner.invoke(app, ["stats", str(folder)])
+    assert stats.exit_code == 0, stats.output
+    assert "unusable, by reason" in stats.output and "no confident shoulder" in stats.output
+    cmp = runner.invoke(app, ["compare", str(folder), str(folder)])
+    assert cmp.exit_code == 0, cmp.output
+    assert "unusable outputs, by reason" in cmp.output and "unusable reference images, by reason" in cmp.output
+    lib = runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "lib.json")])
+    assert lib.exit_code == 0, lib.output
+    assert "no confident shoulder" in lib.output
+    counts = json.loads(
+        runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "l2.json"), "--json"]).stdout
+    )
+    assert counts["unembeddable"] == 1 and counts["unembeddable_reasons"] == {"no_confident_shoulder": 1}
+
+
 def test_compare_a_folder_against_itself_is_all_close(tmp_path) -> None:
     from argus_puppet.models import PoseSetComparison
 

@@ -34,12 +34,13 @@ comparison itself.
 
 Each image contributes its **primary person** (`PoseResult.primary`). An image is **usable** when it has one and
 `embed()` accepts it (see [pose-vector.md](pose-vector.md#unusable-poses)). Unusable images are listed in `items`
-with `usable: false`, keep whatever labels the rules can still decide (an upper-body shot still has arms), and are
-left out of every number.
+with `usable: false` and an `unusable_reason` (see [why a pose is unusable](#why-a-pose-is-unusable)), keep
+whatever labels the rules can still decide (an upper-body shot still has arms), and are left out of every number.
 
 | field | definition |
 |---|---|
 | `count`, `usable` | images, and images with a usable primary pose |
+| `unusable_reasons` | how many images are unusable for each [reason](#why-a-pose-is-unusable), listing only reasons that occur: it sums to `count - usable` and is `{}` when everything is usable (and in documents before wire 1.2) |
 | `comparable_pairs` | pairs of usable poses whose distance is defined (enough shared joints): the denominator of `diversity` and `mean_pairwise_distance` |
 | `comparable_share` | `comparable_pairs / (usable (usable - 1) / 2)`; 0 under two usable. Low when many poses are partial (waist-up crops against full-body shots) |
 | `mean_pairwise_distance` | mean `d` over all comparable usable pairs; 0 under two |
@@ -47,7 +48,46 @@ left out of every number.
 | `clusters` | average-linkage clusters, largest first: `id`, `size`, `share = size / usable`, `medoid` |
 | `largest_cluster_share` | share of the largest cluster; 0 when nothing is usable |
 | `coverage` | per label, the number of usable poses carrying it; every label listed, zero or not |
-| `items` | one per image, **sorted by image name**: `usable`, `cluster`, `labels`, `xy` |
+| `items` | one per image, **sorted by image name**: `usable`, `unusable_reason` (null when usable), `cluster`, `labels`, `xy` |
+
+### Why a pose is unusable
+
+Every unusable image carries exactly one reason (wire 1.2), the first of these checks it fails, in this order.
+`embedding.embed_or_reason` makes the decision and returns the reason from where it is made; `embed()` is the same
+call without the reason, so the reason and the verdict cannot disagree.
+
+| reason | the check | where it is decided |
+|---|---|---|
+| `no_person` | the image has no primary person (nobody was detected) | `metrics.embed_set` |
+| `no_confident_torso` | neither a hip nor a shoulder scores `min_joint_score` (0.3) or more | `embedding._anchor_points` |
+| `no_confident_hip` | a confident shoulder, but no confident hip (a waist-up crop) | `embedding._anchor_points` |
+| `no_confident_shoulder` | a confident hip, but no confident shoulder (a legs crop, shoulders out of frame) | `embedding._anchor_points` |
+| `scale_too_small` | the robust torso scale `S` is under 4 pixels: noise, not a person | `embedding.torso_frame_or_reason` |
+| `too_few_joints` | fewer than `min_usable_joints` (8) of the 17 body joints are confident (a head-and-shoulders portrait) | `embedding.embed_or_reason` |
+
+A doubtful hip or shoulder (score 0.1 to 0.3) still helps place a pose whose other hip or shoulder is confident
+([pose-vector.md](pose-vector.md#unusable-poses)), but never anchors one on its own, so a pose whose only hips are
+doubtful reads `no_confident_hip`. The same reasons appear in `compare` (each unusable output's
+`matches[].unusable_reason`, and `output_unusable_reasons` / `reference_unusable_reasons`) and in library builds
+(`LibraryBuild.unembeddable_reasons`; `no_person` and a low body score are counted separately there, as `no_person`
+and `low_score`). The CLI's `stats`, `compare` and `library build` print the breakdown whenever anything is unusable.
+
+### What makes a pose unusable
+
+The pose vector is centred on the mid-hip and scaled by the torso, so it needs at least one hip and one shoulder in
+frame and confident. A crop without the shoulders (legs and an arm) or without the hips (a head-and-shoulders or
+chest-up shot) is **correctly** unusable: there is nothing to measure its pose against. A set of tight crops
+therefore has a low usable share, and that is the right answer, not an estimator failure; read `unusable_reasons`
+before reading anything into it. A smoke test needs full-body images, or at least the torso (both a hip and a
+shoulder) in frame; guessing from the mean body score is not enough, since a legs crop can have a respectable mean
+and still no shoulder.
+
+The joint-score cut (0.3) is not calibrated by the synthetic sets below: the synthetic generators score every
+joint 0.9 or 0, so any cut between the two gives the same result and they cannot test it. So far it rests on two
+real photos (a full-body shot and a shoulders-out-of-frame crop, the opt-in real-model test in
+`tests/test_real_model.py`), in which every visible joint scored 0.38 or more and every occluded or out-of-frame
+joint 0.26 or less, and on matching the DWPose annotator's drawing threshold (0.3, as `RenderOptions.min_score`
+applies it).
 
 ### Clustering
 
@@ -284,11 +324,13 @@ reference set, so the answer can be read against what "no copying" looks like fo
 | field | definition |
 |---|---|
 | `matches` | one per output image, sorted by image name: `nearest`, `distance`, `shared_joints`, `close`. An output that is unusable, or shares too few joints with every usable reference pose, has `nearest`, `distance` and `shared_joints` null and `close` false. Ties for nearest go to the alphabetically first reference image |
+| `matches[].unusable_reason` | why the output is unusable ([reasons](#why-a-pose-is-unusable)); null for a usable output, matched or not |
 | `matches[].shared_joints` | of the 12 non-head joints (shoulders, elbows, wrists, hips, knees, ankles), how many are confident in both poses, in the orientation compared |
 | `matches[].close` | some reference pose sharing at least `min_close_joints` (12) of those joints is closer than `threshold`. The match then names the nearest such pose; otherwise it names the nearest comparable pose of any coverage, which is reported but never close. A waist-up output is never close to a full-body frame, however well the upper bodies agree |
 | `output_count` | every output image, usable or not (one `matches` entry each) |
 | `matched_count` | outputs with a nearest reference pose |
 | `reference_count` | usable reference poses |
+| `output_unusable_reasons`, `reference_unusable_reasons` | how many images of each set are unusable for each reason, listing only reasons that occur |
 | `close_eligible` | outputs that share all 12 joints with at least one reference pose, so could be close |
 | `close_share` | close outputs / `close_eligible`; 0 when none is eligible |
 | `baseline_eligible`, `baseline_close_share` | the same statistic inside the reference set, leave-one-out: each reference pose against its nearest *other* reference pose, same rules. Null with fewer than two usable reference poses or none eligible |

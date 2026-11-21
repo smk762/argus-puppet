@@ -18,6 +18,8 @@ from argus_puppet.config import DEFAULT_PORT, DEVICES, ConfigError, Settings
 from argus_puppet.models import SCHEMA_PATH, Arms, Facing, Fit, Stance
 
 if TYPE_CHECKING:
+    from rich.table import Table
+
     from argus_puppet.models import MetricParams, PoseResult, PoseSetComparison, PoseSetStats, ScanSummary
 
 app = typer.Typer(
@@ -274,6 +276,17 @@ def stats(
         raise typer.Exit(1)
 
 
+def _reason_rows(table: Table, label: str | None, reasons: dict[str, int]) -> None:
+    """Rows of a rich summary table: how many images are unusable (under *label*, unless it is None), then one
+    indented row per reason. Nothing when every image is usable."""
+    if not reasons:
+        return
+    if label is not None:
+        table.add_row(label, str(sum(reasons.values())))
+    for reason, n in reasons.items():
+        table.add_row(f"  {reason.replace('_', ' ')}", str(n))
+
+
 def _print_stats(folder: Path, s: PoseSetStats, out: Path | None) -> None:
     from rich.console import Console
     from rich.markup import escape
@@ -284,6 +297,7 @@ def _print_stats(folder: Path, s: PoseSetStats, out: Path | None) -> None:
     summary = Table(show_header=False)
     summary.add_row("images", str(s.count))
     summary.add_row("usable poses", str(s.usable))
+    _reason_rows(summary, "unusable, by reason", s.unusable_reasons)
     summary.add_row("comparable pairs", f"{s.comparable_pairs} ({s.comparable_share:.0%} of usable pairs)")
     summary.add_row("diversity", f"{s.diversity:.3f}")
     summary.add_row("mean pairwise distance", f"{s.mean_pairwise_distance:.3f}")
@@ -358,8 +372,10 @@ def _print_comparison(c: PoseSetComparison, top: int, out: Path | None) -> None:
     console = Console()
     summary = Table(show_header=False, title="argus-puppet compare")
     summary.add_row("outputs", str(c.output_count))
+    _reason_rows(summary, "unusable outputs, by reason", c.output_unusable_reasons)
     summary.add_row("matched outputs", str(c.matched_count))
     summary.add_row("usable reference poses", str(c.reference_count))
+    _reason_rows(summary, "unusable reference images, by reason", c.reference_unusable_reasons)
     summary.add_row("close-match eligible outputs", str(c.close_eligible))
     summary.add_row("close share", f"{c.close_share:.0%} (distance < {c.threshold:g}, whole limb skeleton shared)")
     if c.baseline_close_share is None:
@@ -610,6 +626,7 @@ def library_build(
         "no_person": build.no_person,
         "low_score": build.low_score,
         "unembeddable": build.unembeddable,
+        "unembeddable_reasons": build.unembeddable_reasons,
         "duplicate_ids": build.duplicate_ids,
         "near_duplicates": build.near_duplicates,
         "sampled_out": build.sampled_out,
@@ -646,6 +663,8 @@ def _print_build(counts: dict) -> None:
         rows += ["age_passed", "under_age", "age_unchecked"]
     for key in rows:
         table.add_row(key.replace("_", " "), str(counts[key]))
+        if key == "unembeddable":
+            _reason_rows(table, None, counts["unembeddable_reasons"])
     console.print(table)
     for item in counts["age_excluded"]:
         console.print(f"[yellow]age check kept out[/yellow] {escape(item['image'])}: {escape(item['why'])}")

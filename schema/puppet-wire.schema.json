@@ -342,7 +342,7 @@
           "title": "Provider"
         },
         "puppet_version": {
-          "default": "1.1",
+          "default": "1.2",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -790,7 +790,7 @@
           "type": "string"
         },
         "puppet_version": {
-          "default": "1.1",
+          "default": "1.2",
           "title": "Puppet Version",
           "type": "string"
         }
@@ -936,6 +936,27 @@
           "default": null,
           "description": "Non-head body joints (of 12: shoulders, elbows, wrists, hips, knees, ankles) confident in both poses in the orientation compared; null exactly when nearest is null.",
           "title": "Shared Joints"
+        },
+        "unusable_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "no_person",
+                "no_confident_torso",
+                "no_confident_hip",
+                "no_confident_shoulder",
+                "scale_too_small",
+                "too_few_joints"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the output is not usable, when it is not (then nearest is null): 'no_person' (no primary person), 'no_confident_torso' (neither a hip nor a shoulder at params.min_joint_score), 'no_confident_hip' (a shoulder but no hip, e.g. a waist-up crop), 'no_confident_shoulder' (a hip but no shoulder, e.g. a legs crop), 'scale_too_small' (torso under 4 px), 'too_few_joints' (fewer than params.min_usable_joints confident body joints); the first failing check, in that order (docs/metrics.md). Null for a usable output, matched or not (and in payloads before puppet_version 1.2).",
+          "title": "Unusable Reason"
         }
       },
       "required": [
@@ -999,7 +1020,7 @@
           "title": "Primary"
         },
         "puppet_version": {
-          "default": "1.1",
+          "default": "1.2",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1126,11 +1147,30 @@
           "default": null,
           "description": "Quantiles, over the eligible outputs, of the distance to the nearest reference pose sharing params.min_close_joints joints; null when no output is eligible."
         },
+        "output_unusable_reasons": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "How many output images are unusable for each reason (matches' unusable_reason), listing only reasons that occur; empty when every output is usable (and in payloads before puppet_version 1.2).",
+          "propertyNames": {
+            "enum": [
+              "no_person",
+              "no_confident_torso",
+              "no_confident_hip",
+              "no_confident_shoulder",
+              "scale_too_small",
+              "too_few_joints"
+            ]
+          },
+          "title": "Output Unusable Reasons",
+          "type": "object"
+        },
         "params": {
           "$ref": "#/$defs/MetricParams"
         },
         "puppet_version": {
-          "default": "1.1",
+          "default": "1.2",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1154,6 +1194,25 @@
           ],
           "default": null,
           "description": "Quantiles, over the eligible reference poses, of the distance to the nearest other reference pose sharing params.min_close_joints joints (leave-one-out); null when baseline_close_share is null. Outputs whose quantiles sit well below these are closer to the training frames than the frames are to each other."
+        },
+        "reference_unusable_reasons": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "How many reference images are unusable for each reason, listing only reasons that occur; empty when every reference image is usable (and in payloads before puppet_version 1.2).",
+          "propertyNames": {
+            "enum": [
+              "no_person",
+              "no_confident_torso",
+              "no_confident_hip",
+              "no_confident_shoulder",
+              "scale_too_small",
+              "too_few_joints"
+            ]
+          },
+          "title": "Reference Unusable Reasons",
+          "type": "object"
         },
         "threshold": {
           "description": "Pose distance below which a match can be close.",
@@ -1200,6 +1259,27 @@
         },
         "labels": {
           "$ref": "#/$defs/PoseLabels"
+        },
+        "unusable_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "no_person",
+                "no_confident_torso",
+                "no_confident_hip",
+                "no_confident_shoulder",
+                "scale_too_small",
+                "too_few_joints"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why it is not usable: 'no_person' (no primary person), 'no_confident_torso' (neither a hip nor a shoulder at params.min_joint_score), 'no_confident_hip' (a shoulder but no hip, e.g. a waist-up crop), 'no_confident_shoulder' (a hip but no shoulder, e.g. a legs crop), 'scale_too_small' (torso under 4 px), 'too_few_joints' (fewer than params.min_usable_joints confident body joints); the first failing check, in that order (docs/metrics.md). Null when usable (and in payloads before puppet_version 1.2).",
+          "title": "Unusable Reason"
         },
         "usable": {
           "description": "Whether it had a primary person with enough confident joints to embed (see params).",
@@ -1360,9 +1440,28 @@
           "$ref": "#/$defs/MetricParams"
         },
         "puppet_version": {
-          "default": "1.1",
+          "default": "1.2",
           "title": "Puppet Version",
           "type": "string"
+        },
+        "unusable_reasons": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "How many images are unusable for each reason (items' unusable_reason), listing only reasons that occur, so it sums to count - usable and is empty when every image is usable (and in payloads before puppet_version 1.2).",
+          "propertyNames": {
+            "enum": [
+              "no_person",
+              "no_confident_torso",
+              "no_confident_hip",
+              "no_confident_shoulder",
+              "scale_too_small",
+              "too_few_joints"
+            ]
+          },
+          "title": "Unusable Reasons",
+          "type": "object"
         },
         "usable": {
           "description": "Images with a usable primary pose.",
@@ -1575,7 +1674,7 @@
           "type": "integer"
         },
         "puppet_version": {
-          "default": "1.1",
+          "default": "1.2",
           "title": "Puppet Version",
           "type": "string"
         },

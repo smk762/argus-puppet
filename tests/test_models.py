@@ -288,7 +288,7 @@ def test_schema_covers_the_top_level_payloads() -> None:
 
 
 def test_wire_1_1_adds_optional_person_labels() -> None:
-    assert PUPPET_VERSION == "1.1"
+    assert tuple(int(x) for x in PUPPET_VERSION.split(".")) >= (1, 1)
     schema = json.loads(render_wire_schema())
     person = schema["$defs"]["PersonPose"]
     assert "labels" in person["properties"] and "labels" not in person.get("required", [])
@@ -302,3 +302,16 @@ def test_wire_1_1_adds_optional_person_labels() -> None:
     # and a labelled person round-trips
     labelled = result().people[0].model_copy(update={"labels": PoseLabels(stance="seated", arms="down")})
     assert PersonPose.model_validate_json(labelled.model_dump_json()).labels == labelled.labels
+
+
+def test_wire_1_2_adds_optional_unusable_reasons() -> None:
+    assert PUPPET_VERSION == "1.2"
+    defs = json.loads(render_wire_schema())["$defs"]
+    for model, fld in (
+        ("PoseSetItem", "unusable_reason"),
+        ("PoseSetStats", "unusable_reasons"),
+        ("PoseMatch", "unusable_reason"),
+        ("PoseSetComparison", "output_unusable_reasons"),
+        ("PoseSetComparison", "reference_unusable_reasons"),
+    ):
+        assert fld in defs[model]["properties"] and fld not in defs[model].get("required", [])

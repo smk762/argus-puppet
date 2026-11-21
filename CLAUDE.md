@@ -85,6 +85,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   `image_for_sidecar` (the image a sidecar sits beside).
 - `embedding.py` — the pose vector (body-17, hip-centred, robust torso scale, masked joints) and the mirror-invariant
   distance (`pose_distance`, chunked `pairwise_distances`/`cross_distances`). Pure numpy. See `docs/pose-vector.md`.
+  `embed_or_reason`/`torso_frame_or_reason` are the single source of `UnusableReason` (the wire's
+  `unusable_reason`); `embed`/`torso_frame` wrap them. Never re-derive a reason elsewhere.
 - `labels.py` — `pose_labels(kp)`: stance / arms / facing from geometry rules (named threshold constants). The one
   source of labels: metrics, compare and library always recompute from keypoints and never read a stored
   `PersonPose.labels` (`tests/test_metrics.py::test_stored_person_labels_never_change_stats_compare_or_library`).

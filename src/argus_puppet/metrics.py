@@ -11,6 +11,7 @@ output's items are listed in that order. See ``docs/metrics.md``.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -18,9 +19,13 @@ import numpy as np
 
 from argus_puppet.embedding import (
     JOINT_WEIGHTS,
+    NO_PERSON,
+    UNUSABLE_REASONS,
     PoseVector,
+    UnusableReason,
     align_to_mean,
     embed,
+    embed_or_reason,
     masked_mean,
     pairwise_distances,
     stack,
@@ -64,6 +69,7 @@ __all__ = [
     "pair_diversity",
     "pose_set_stats",
     "project_2d",
+    "reason_counts",
     "set_distances",
     "shared_estimator",
 ]
@@ -236,13 +242,23 @@ class EmbeddedSet:
     images: list[str]
     labels: list[PoseLabels]
     vectors: list[PoseVector | None]
+    reasons: list[UnusableReason | None]  # why each vector is None (None exactly where the vector is set)
 
     @property
     def usable_index(self) -> list[int]:
         return [i for i, v in enumerate(self.vectors) if v is not None]
 
+    def reason_counts(self) -> dict[UnusableReason, int]:
+        return reason_counts(self.reasons)
+
     def usable_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         return stack([v for v in self.vectors if v is not None])
+
+
+def reason_counts(reasons: Sequence[UnusableReason | None]) -> dict[UnusableReason, int]:
+    """How many of *reasons* name each unusable reason: only those that occur, in :data:`UNUSABLE_REASONS` order."""
+    counts = Counter(r for r in reasons if r is not None)
+    return {r: counts[r] for r in UNUSABLE_REASONS if counts[r]}
 
 
 def set_distances(coords: np.ndarray, mask: np.ndarray, params: MetricParams) -> np.ndarray:
@@ -291,17 +307,21 @@ def embed_set(results: Sequence[PoseResult], params: MetricParams) -> EmbeddedSe
     images: list[str] = []
     labels: list[PoseLabels] = []
     vectors: list[PoseVector | None] = []
+    reasons: list[UnusableReason | None] = []
     for r in sorted(results, key=_sort_key):
         p = r.primary_person
         images.append(r.image)
         if p is None:
             labels.append(PoseLabels())
             vectors.append(None)
+            reasons.append(NO_PERSON)
             continue
         kp = p.keypoints_array()
         labels.append(pose_labels(kp, min_joint_score=params.min_joint_score))
-        vectors.append(embed(kp, min_joint_score=params.min_joint_score, min_usable_joints=params.min_usable_joints))
-    return EmbeddedSet(images=images, labels=labels, vectors=vectors)
+        v = embed_or_reason(kp, min_joint_score=params.min_joint_score, min_usable_joints=params.min_usable_joints)
+        vectors.append(v if isinstance(v, PoseVector) else None)
+        reasons.append(None if isinstance(v, PoseVector) else v)
+    return EmbeddedSet(images=images, labels=labels, vectors=vectors, reasons=reasons)
 
 
 # ── the set stats ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -311,7 +331,7 @@ def pose_set_stats(results: Sequence[PoseResult], *, params: MetricParams | None
     """Diversity, clusters, coverage and a 2D projection of a set's primary poses.
 
     Images without a primary person, or whose primary person cannot be embedded, are listed with ``usable`` false
-    (their labels are still filled where the rules can decide) and are left out of every number. Items come back
+    and an ``unusable_reason`` (counted in ``unusable_reasons``; see :func:`embedding.embed_or_reason`) (their labels are still filled where the rules can decide) and are left out of every number. Items come back
     sorted by image name; cluster ids run from 0 for the largest cluster, ties broken by the alphabetically first
     image in each.
     """
@@ -344,6 +364,7 @@ def pose_set_stats(results: Sequence[PoseResult], *, params: MetricParams | None
         PoseSetItem(
             image=es.images[i],
             usable=i in pos,
+            unusable_reason=es.reasons[i],
             cluster=int(cluster_of[pos[i]]) if i in pos else None,
             labels=es.labels[i],
             xy=(float(xy[pos[i], 0]), float(xy[pos[i], 1])) if i in pos else None,
@@ -355,6 +376,7 @@ def pose_set_stats(results: Sequence[PoseResult], *, params: MetricParams | None
     return PoseSetStats(
         count=len(es.images),
         usable=n_usable,
+        unusable_reasons=es.reason_counts(),
         comparable_pairs=n_comparable,
         comparable_share=n_comparable / pairs if pairs else 0.0,
         diversity=diversity(dist, params.diversity_scale),
