@@ -14,6 +14,8 @@ from argus_puppet.render import (
     HAND_DOT_COLOR,
     HAND_EDGE_COLORS,
     LIMB_DIM,
+    _ellipse_polygon,
+    _fill_convex_polygon,
     canvas_transform,
     render_array,
     render_png,
@@ -96,7 +98,8 @@ def test_canvas_holds_only_convention_colours_with_hard_edges() -> None:
 
 
 def test_limb_ellipse_has_the_stick_width() -> None:
-    """Across the middle of the upper arm (a vertical-ish limb), the coloured run is about 2 x 4 px wide."""
+    """Across the middle of the forearm (a vertical-ish limb), the coloured run is 2 x 4 + 1 px wide, as OpenCV's
+    polygon fill (outline included) draws a semi-minor axis of 4."""
     kp = big()
     img = render_array(kp, BODY_ONLY, source_size=SIZE)
     body = to_openpose18(kp)
@@ -104,7 +107,68 @@ def test_limb_ellipse_has_the_stick_width() -> None:
     mid = (body[a, :2] + body[b, :2]) / 2
     row = img[int(mid[1])]
     run = np.flatnonzero((row == dim(OPENPOSE_COLORS[3])).all(axis=1))
-    assert 7 <= len(run) <= 10
+    assert len(run) == 9
+
+
+# Integer facts measured from the reference annotator itself: controlnet_aux dwpose/util.py draw_bodypose /
+# draw_handpose / draw_facepose at commit b1aac318b15c4e65a21bc516dc236ad4bf593d46, OpenCV 4.14, on a 256 x 256
+# (limbs) or 64 x 64 (hand, face) canvas. Limbs are limb 3 (right elbow -> right wrist) alone, so its dimmed colour
+# counts the limb pixels the two radius-4 joint discs leave uncovered.
+REF_LIMBS = {
+    # name: (elbow, wrist, limb pixel count, limb bbox (x0, y0, x1, y1) inclusive)
+    "horizontal 80 px": ((88.0, 128.0), (168.0, 128.0), 567, (92, 124, 164, 132)),
+    # Float angle 44.9 degrees, drawn at int(44.9) = 44; the exact ellipse's box would be (31, 31, 167, 166).
+    "angle 44.9": (
+        (28 + 200 * math.cos(math.radians(44.9)), 28 + 200 * math.sin(math.radians(44.9))),
+        (28.0, 28.0),
+        1415,
+        (29, 31, 168, 166),
+    ),
+    # -44.9 degrees truncates toward zero, to -44 (not -45).
+    "angle -44.9": (
+        (28 + 200 * math.cos(math.radians(44.9)), 228 - 200 * math.sin(math.radians(44.9))),
+        (28.0, 228.0),
+        1419,
+        (27, 89, 168, 224),
+    ),
+    # Midpoint (100.9, 100.6) truncates to (100, 100): the 9 px run is columns 96..104, not centred on 100.9.
+    "centre truncated": ((100.9, 60.6), (100.9, 140.6), 567, (96, 64, 104, 136)),
+}
+
+
+def _one_limb(elbow: tuple[float, float], wrist: tuple[float, float], scale: float = 1.0) -> np.ndarray:
+    kp = np.zeros((133, 3))
+    kp[8], kp[10] = (*elbow, 1.0), (*wrist, 1.0)  # COCO right elbow / wrist: OpenPose joints 3 and 4
+    side = round(256 * scale)
+    img = render_array(kp, BODY_ONLY, source_size=(256, 256), canvas_size=(side, side), stroke_scale=scale)
+    return (img == dim(OPENPOSE_COLORS[3])).all(axis=-1)
+
+
+@pytest.mark.parametrize("name", list(REF_LIMBS))
+def test_limbs_rasterise_as_the_reference(name: str) -> None:
+    # Regression: limbs were exact float ellipses, ~0.5 px thinner per side than the annotator's and up to 1 px / 1
+    # degree off its integer-truncated centre, half-length and angle (horizontal limb: 463 px against 567).
+    elbow, wrist, area, box = REF_LIMBS[name]
+    mask = _one_limb(elbow, wrist)
+    ys, xs = np.nonzero(mask)
+    assert int(mask.sum()) == area
+    assert (xs.min(), ys.min(), xs.max(), ys.max()) == box
+
+
+def test_the_limb_polygon_is_opencvs() -> None:
+    # cv2.fillConvexPoly(cv2.ellipse2Poly((64, 32), (40, 4), 0, 0, 360, 1)) covers 597 px (the exact 40 x 4 ellipse
+    # covers 481): the polygon's outline is filled too, so the shape is about half a pixel fatter on every side.
+    canvas = np.zeros((64, 128, 3), dtype=np.uint8)
+    _fill_convex_polygon(canvas, _ellipse_polygon(64, 32, 40, 4, 0), (255, 255, 255))
+    assert int(canvas.any(axis=-1).sum()) == 597
+
+
+def test_a_scaled_limb_is_the_grown_ellipse_on_the_annotators_grid() -> None:
+    # At stroke scale 2 the annotator would draw on a grid half the size: the 80 px limb there is 9 rows thick, so
+    # 18 rows here, centred on the grid pixel's centre (2 * 128 + 0.5).
+    mask = _one_limb((88.0, 128.0), (168.0, 128.0), scale=2.0)
+    rows = np.flatnonzero(mask[:, 256])
+    assert (rows.min(), rows.max()) == (248, 265)
 
 
 def test_black_background_and_canvas_size() -> None:
@@ -185,6 +249,52 @@ def test_visibility_follows_the_annotator() -> None:
     hands_face = render_array(at, RenderOptions(body=False), source_size=SIZE)
     assert HAND_DOT_COLOR in colours(hands_face) and FACE_COLOR in colours(hands_face)  # hands and face: at or above
     assert not render_array(at, RenderOptions(min_score=0.31), source_size=SIZE).any()
+
+
+HANDS_ONLY = RenderOptions(body=False, face=False, stroke_scale=1.0)
+
+
+def _hand_root_at(x: float, *, side: int = 64, scale: float = 1.0) -> np.ndarray:
+    """A right hand of two points: the root at (x, 20 * scale) and point 1 at (30, 20) * scale (edge 0, red)."""
+    kp = np.zeros((133, 3))
+    kp[RIGHT_HAND.start] = (x, 20 * scale, 0.9)
+    kp[RIGHT_HAND.start + 1] = (30 * scale, 20 * scale, 0.9)
+    return render_array(kp, HANDS_ONLY, source_size=(side, side), stroke_scale=scale)
+
+
+@pytest.mark.parametrize(("x", "drawn"), [(0.4, False), (0.9, False), (1.0, True), (-3.0, False)])
+def test_a_hand_point_under_one_pixel_from_the_left_edge_is_dropped_with_its_edges(x: float, drawn: bool) -> None:
+    # Regression: the annotator's eps test (int(x * W) > 0.01, i.e. truncated pixel x and y both >= 1) was missing,
+    # so a hand point hugging the left or top edge was drawn. Reference (64 x 64): x = 0.4 and 0.9 leave 49 blue px
+    # (point 1's dot) and no red; x = 1.0 draws the root dot and the red edge too.
+    img = _hand_root_at(x)
+    blue = (img == HAND_DOT_COLOR).all(axis=-1)
+    red = (img == HAND_EDGE_COLORS[0]).all(axis=-1)
+    assert bool(blue[:, :6].any()) is drawn
+    assert bool(red.any()) is drawn
+    assert blue[:, 20:].sum() == 49  # point 1's dot, drawn either way
+
+
+@pytest.mark.parametrize(("y", "drawn"), [(0.4, False), (0.9, False), (1.2, True)])
+def test_a_face_point_under_one_pixel_from_the_top_edge_is_dropped(y: float, drawn: bool) -> None:
+    kp = np.zeros((133, 3))
+    kp[FACE.start] = (30, y, 0.9)
+    img = render_array(kp, RenderOptions(body=False, hands=False, stroke_scale=1.0), source_size=(64, 64))
+    assert int((img == FACE_COLOR).all(axis=-1).sum()) == (23 if drawn else 0)  # reference: 23 px at y = 1.2
+
+
+def test_body_joints_have_no_near_edge_test() -> None:
+    kp = np.zeros((133, 3))
+    kp[10] = (0.4, 20, 0.9)  # right wrist, OpenPose joint 4
+    img = render_array(kp, BODY_ONLY, source_size=(64, 64))
+    assert int((img == OPENPOSE_COLORS[4]).all(axis=-1).sum()) == 29  # reference: the clipped radius-4 disc
+
+
+def test_the_near_edge_band_is_one_annotator_grid_pixel() -> None:
+    # Under stroke scale k the annotator's grid is the canvas divided by k, so the band is k px here.
+    for x, drawn in ((1.5, False), (1.99, False), (2.0, True)):
+        img = _hand_root_at(x, side=128, scale=2.0)
+        assert bool((img == HAND_EDGE_COLORS[0]).all(axis=-1).any()) is drawn, x
 
 
 # ── people ───────────────────────────────────────────────────────────────────────────────────────────────────────

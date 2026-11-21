@@ -89,7 +89,9 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 - `compare.py` — `compare_pose_sets(outputs, reference, threshold=0.08, params=)`: nearest reference per output (null
   when none is comparable), memorised share over matched outputs, coverage JS divergence. See `docs/metrics.md`.
 - `render.py` — OpenPose-convention control images from scratch (numpy + Pillow): `render_pose/array/png`,
-  `canvas_size`, `canvas_transform`; `RenderOptions` carries fit/stroke/margin/primary, keywords override.
+  `canvas_size`, `canvas_transform`; `RenderOptions` carries fit/stroke/margin/primary, keywords override. Limbs
+  reproduce `cv2.ellipse2Poly` + `fillConvexPoly` in numpy (`_ellipse_polygon`, `_fill_convex_polygon`; pixel-exact
+  at stroke scale 1, never import OpenCV); geometry is truncated on the annotator's grid (canvas / k) as it does.
 - `sampling.py` — generic `deduplicate` and `farthest_point_sample` over a distance matrix (NaN = incomparable).
 - `library.py` — `build_library` (real distance, `pose_labels`, average-linkage clusters and 0.08 dedupe by default;
   optional `AgeGate`), `sample`, `render_entries`, `save_library`/`load_library`. See `docs/conditioning.md`.

@@ -31,8 +31,11 @@ Pixel sizes are at the annotator's 512 px working resolution; see [sizing](#sizi
 
 **Visibility** is the DWPose annotator's: a body joint is visible when its score is **strictly above** `min_score`
 (default 0.3), so the synthesised neck appears only when both shoulders are above it; a hand or face point when its
-score is **at or above** it. A point with a non-finite coordinate, or one more than 10^6 px from the origin, is never
-drawn; anything off the canvas is clipped.
+score is **at or above** it. A hand or face point also needs both its coordinates, truncated to whole pixels at the
+annotator's resolution, to be at least 1: one less than a pixel from the left or top edge (`k` px at stroke scale
+`k`), or off the canvas there, is dropped with every hand edge touching it, as the annotator drops it. A point with a
+non-finite coordinate, or one more than 10^6 px from the origin, is never drawn; anything else off the canvas is
+clipped.
 
 **Draw order** across people is also the annotator's: limb 0 of every person, then limb 1 of every person, up to
 limb 16; the dimming; joint 0 of every person, up to joint 17; then every person's left hand, then every right hand
@@ -86,22 +89,51 @@ SDXL) rather than resizing a small control image afterwards, which would blur th
 
 ### Checked against the reference, and the known deviations
 
-The renderer was checked against the DWPose annotator's drawing rules **read as source text** (colours, limb and
-hand-edge lists, shapes, widths, radii, the dimming, visibility thresholds, draw order and resolution handling), not
-by pixel-comparing its output; the tests pin each rule. Known, small deviations that remain:
+The renderer was checked against the DWPose annotator by **pixel comparison**: controlnet_aux's `dwpose/util.py`
+drawing functions (commit `b1aac318`, OpenCV 4.14; upstream IDEA-Research DWPose draws identically) rendered the
+same canvas-space keypoints as puppet in 25 cases (two real photos at 256 to 2048 px, SD and SDXL canvases, each
+part alone, two overlapping people, scores straddling the threshold, points on the canvas edge). The annotator was
+run as its controlnet_aux pipeline (draw at short side 512, both sides rounded to 64, then a bilinear resize),
+compared with puppet's `stroke_scale="auto"`, and drawn straight onto the canvas, compared with `stroke_scale=1`.
+The tests pin each rule, with a handful of integer facts (pixel counts, boxes) taken from the annotator itself.
 
-- **Ellipse rasterisation.** The annotator truncates the ellipse centre, half-length and angle to integers before
-  polygonising it (`cv2.ellipse2Poly` at 1 degree steps); puppet fills the exact rotated ellipse. Edges differ by
-  up to about a pixel.
-- **Line caps.** The annotator's 2 px hand lines have round caps (OpenCV); puppet's (Pillow) are square. Visible only
-  at the finger tips, under the dots.
-- **Resizing.** The annotator draws at 512 px and resizes with bilinear interpolation, which softens edges and adds
-  in-between shades; puppet draws at the output size with hard edges, so the output holds only convention colours.
-  At large canvases the reference's strokes look slightly blockier; thickness agrees to within the interpolation
-  blur.
-- **The near-origin test for hands and face.** The annotator marks hidden hand and face points with -1 and then skips
-  any point within 1 % of the image's left or top edge; puppet skips only points below the score threshold, so a
-  genuine hand or face point hugging those edges is drawn here and dropped there.
+What matches exactly: the palette, the limb, joint and hand-edge assignment, the 60 % dimming, visibility at the
+default threshold, draw order, face dots, and the **limbs**: centre, half-length and angle truncated to integers
+on the annotator's grid as it does, then `cv2.ellipse2Poly`'s 1-degree polygon filled as `cv2.fillConvexPoly` fills
+it (outline included). With body and face only, puppet's image is pixel-identical to the annotator's whenever the
+annotator draws at the output size: a stroke scale of 1, or `"auto"` on a canvas whose short side is 512 (e.g.
+512 x 768). A hand or face point is drawn only when its coordinates, truncated to integers on the annotator's grid,
+are both at least 1 (the annotator's `eps` test compares that integer, so the band is one grid pixel, `k` px at
+stroke scale `k`, not a share of the image), and a hand edge only when both its ends are; body joints have no such
+test.
+
+Share of pixels differing by more than 16/255 after these fixes (before them: 0.2 to 0.9 %):
+
+| Case | Differing > 16 | Mask IoU |
+|---|---|---|
+| Drawn at the output size, body and face only | 0.000 % | 1.000 |
+| Drawn at the output size, with hands | 0.004 to 0.05 % | 0.95 to 1.00 |
+| `"auto"`, canvas upscaled from 512 (707 to 1536 px short side) | 0.58 to 0.82 % | 0.85 to 0.87 |
+| `"auto"`, canvas downscaled from 512 (177 to 480 px short side) | 0.45 to 0.71 % | 0.82 to 0.88 |
+
+Deviations that remain:
+
+- **Hand lines (and their caps).** The annotator draws its 2 px hand lines with OpenCV (integer endpoints, round
+  caps); puppet draws them with Pillow (float endpoints, square caps). This is all that still differs when drawing
+  at the output size: from a few pixels per image at 512 px to about a thousand on a 2048 px canvas, along the
+  finger lines, nearly all where the reference draws and puppet does not.
+- **Resizing.** The annotator draws at 512 px and resizes with bilinear interpolation, which softens edges, adds
+  in-between shades and snaps every shape to its 512 grid; puppet draws at the output size with hard edges, so the
+  output holds only convention colours. On upscaled canvases nearly every remaining differing pixel is one of those
+  blended rim shades (a 1 px rim round each shape, which puppet leaves black or full colour); on canvases under
+  512 px the annotator's downscale also aliases, breaking thin lines and smudging dots. Puppet emulates the 512 grid
+  for limb geometry and the near-edge band (limbs are the exact ellipse the polygon fill covers, grown half a grid
+  pixel on both axes and scaled), not the resampling.
+- **Anisotropic working size.** The annotator rounds both sides of its working size to multiples of 64, so for an
+  aspect ratio that isn't a multiple of 64 its strokes come out a few per cent wider along one axis than the other
+  (1280 x 884: 3.6 %); puppet scales strokes uniformly by `min(width, height) / 512`.
+- **Canvas borders.** OpenCV clips a polygon's outline to the canvas before walking it, which can move a pixel on
+  the border row or column where a limb leaves the canvas.
 
 ```python
 from argus_puppet.models import PoseResult, RenderOptions
