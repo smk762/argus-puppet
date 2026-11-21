@@ -135,3 +135,48 @@ def test_min_joint_score_is_respected() -> None:
     kp[:, 2] = np.where(kp[:, 2] > 0, 0.5, 0.0)
     assert pose_labels(kp, min_joint_score=0.4).arms == "out"
     assert pose_labels(kp, min_joint_score=0.6) == PoseLabels()
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_a_frontal_shot_with_one_shoulder_cropped_is_not_a_profile(mirror: bool) -> None:
+    # Regression: one confident shoulder alone triggered the profile branch and read 'left' / 'right'.
+    for side in ((Joint.RIGHT_SHOULDER, Joint.RIGHT_EAR), (Joint.LEFT_SHOULDER, Joint.LEFT_EAR)):
+        got = labels("standing", dropout=side, mirror=mirror).facing
+        assert got not in ("left", "right"), (side, got)
+    # A real profile with one shoulder still reads as one: the far eye is hidden.
+    assert labels("profile", dropout=(Joint.RIGHT_SHOULDER,), mirror=mirror).facing == ("right" if mirror else "left")
+
+
+def test_frontal_kneeling_upright_is_not_standing() -> None:
+    # Regression: seen from the front, the shin of someone kneeling upright points away from the camera, so the leg
+    # looks straight and vertical but short; it read 'standing'.
+    from posegen import render, to_image
+
+    body = render(Figure())
+    for knee, ankle in ((Joint.LEFT_KNEE, Joint.LEFT_ANKLE), (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE)):
+        body[ankle, :2] = body[knee, :2] + np.array([0.0, -0.15])
+    kp = to_image(body)
+    assert pose_labels(kp).stance != "standing"
+    long_shin = render(Figure())
+    assert pose_labels(to_image(long_shin)).stance == "standing"
+
+
+def test_label_mirror_consistency_on_random_jittered_poses() -> None:
+    from argus_puppet.skeleton import flip_horizontal
+
+    rng = np.random.default_rng(40)
+    names = list(PRESETS)
+    for _ in range(600):
+        drop = tuple(int(j) for j in rng.choice(17, size=rng.integers(0, 5), replace=False))
+        kp = make(
+            names[rng.integers(len(names))],
+            rng=rng,
+            angle_jitter=15,
+            joint_noise=0.04,
+            dropout=drop,
+            scale=rng.uniform(30, 300),
+            mirror=bool(rng.integers(2)),
+        )
+        kp[:, 2] = np.where(kp[:, 2] > 0, rng.uniform(0.25, 1.0, 133), 0)
+        a, b = pose_labels(kp), pose_labels(flip_horizontal(kp, 1000))
+        assert (a.stance, a.arms, MIRRORED_FACING.get(a.facing, a.facing)) == (b.stance, b.arms, b.facing)

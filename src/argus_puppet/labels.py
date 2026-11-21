@@ -12,7 +12,7 @@ What one 2D frame can decide is limited, and the rules say ``unknown`` rather th
   the hips with the feet hanging below them) and a *star* (upright torso, both legs straight and splayed to opposite
   sides, both arms raised or out). A person striking a star pose on the ground reads as jumping; a jump with ordinary
   running legs reads as standing or unknown.
-* **Standing needs a whole leg** (hip, knee and ankle): a straight vertical thigh without its ankle could be kneeling
+* **Standing needs a whole leg** (hip, knee and ankle) with a visible shin: a straight vertical thigh without its ankle, or with a short shin, could be kneeling
   upright, so it is unknown.
 
 The thresholds are named constants below, each with the reasoning behind it; ``docs/metrics.md`` tabulates them.
@@ -65,6 +65,9 @@ THIGH_RAISED_MIN_DEG = 55.0
 THIGH_FORESHORTENED = 0.45
 # A standing thigh shows at least 0.55 torso units: shorter and it is coming toward the camera (seated, kneeling).
 THIGH_STANDING_MIN = 0.55
+# A standing shin shows at least 0.5 torso units (an adult shin is ~0.85): shorter and it points away from or toward
+# the camera, as in a frontal view of someone kneeling upright, whose straight-looking leg is not standing.
+SHIN_STANDING_MIN = 0.5
 
 # Interior knee angle (hip-knee-ankle): 180 is a straight leg.
 KNEE_STRAIGHT_MIN_DEG = 150.0  # straight enough to stand on
@@ -116,6 +119,7 @@ class _Leg:
     knee_deg: float | None  # interior hip-knee-ankle angle; None without the ankle
     ankle_drop: float | None  # (ankle_y - hip_y) / scale: positive when the foot is below the hip
     shin_drop: float | None  # (ankle_y - knee_y) / scale
+    shin_len: float | None  # torso units, as seen
     splay_deg: float | None  # hip -> ankle, degrees from down
     ankle_x: float | None  # pixels
 
@@ -136,13 +140,14 @@ def _leg(kp: np.ndarray, ok: np.ndarray, hip: int, knee: int, ankle: int, scale:
         return None
     h, k = kp[hip, :2], kp[knee, :2]
     thigh = k - h
-    knee_deg = ankle_drop = shin_drop = splay = ankle_x = None
+    knee_deg = ankle_drop = shin_drop = shin_len = splay = ankle_x = None
     if ok[ankle]:
         a = kp[ankle, :2]
         # A zero-length thigh or shin has no angle; call the leg straight rather than folded.
         knee_deg = _deg_from(h - k, a - k) if np.hypot(*(a - k)) > 0 and np.hypot(*(h - k)) > 0 else 180.0
         ankle_drop = float(a[1] - h[1]) / scale
         shin_drop = float(a[1] - k[1]) / scale
+        shin_len = float(np.hypot(*(a - k))) / scale
         splay = _deg_from(a - h, _DOWN)
         ankle_x = float(a[0])
     return _Leg(
@@ -152,6 +157,7 @@ def _leg(kp: np.ndarray, ok: np.ndarray, hip: int, knee: int, ankle: int, scale:
         knee_deg=knee_deg,
         ankle_drop=ankle_drop,
         shin_drop=shin_drop,
+        shin_len=shin_len,
         splay_deg=splay,
         ankle_x=ankle_x,
     )
@@ -196,7 +202,7 @@ def _stance(kp: np.ndarray, ok: np.ndarray, frame: TorsoFrame | None, arm_classe
         return (
             g.thigh_deg <= THIGH_VERTICAL_MAX_DEG
             and g.thigh_len >= THIGH_STANDING_MIN
-            and (g.knee_deg is None or g.knee_deg >= KNEE_STRAIGHT_MIN_DEG)
+            and (g.knee_deg is None or (g.knee_deg >= KNEE_STRAIGHT_MIN_DEG and g.shin_len >= SHIN_STANDING_MIN))  # type: ignore[operator]
         )
 
     if torso_deg > TORSO_INVERTED_DEG:
@@ -276,7 +282,13 @@ def _facing(kp: np.ndarray, ok: np.ndarray, frame: TorsoFrame | None) -> Facing:
     both_shoulders = bool(ok[L_SHOULDER] and ok[R_SHOULDER])
     one_shoulder = bool(ok[L_SHOULDER]) != bool(ok[R_SHOULDER])
     width = abs(l_across - r_across) if both_shoulders else 0.0
-    profile = one_shoulder or (both_shoulders and width / s < PROFILE_SHOULDER_RATIO_MAX)
+    # One shoulder alone is also what a frontal shot cropped at one side looks like: a face seen from the front
+    # (both eyes confident, the nose, if confident, between them across the body) rules the profile out.
+    frontal_face = bool(ok[L_EYE] and ok[R_EYE])
+    if frontal_face and ok[NOSE]:
+        eyes = sorted((float(np.dot(kp[L_EYE, :2], across)), float(np.dot(kp[R_EYE, :2], across))))
+        frontal_face = eyes[0] <= float(np.dot(kp[NOSE, :2], across)) <= eyes[1]
+    profile = (one_shoulder and not frontal_face) or (both_shoulders and width / s < PROFILE_SHOULDER_RATIO_MAX)
     if profile:
         # "Left" and "right" are the image's; they only mean something for a roughly upright subject.
         if not ok[NOSE] or _deg_from(frame.mid_shoulder - frame.mid_hip, _UP) >= TORSO_LYING_MIN_DEG:

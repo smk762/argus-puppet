@@ -196,7 +196,7 @@ knee.
 | unknown | upright torso but no whole leg (hip, knee and ankle): an upper-body shot, or a vertical thigh that could be standing or kneeling |
 | jumping (star) | torso within 25 degrees of vertical; both legs whole and straight (knee 150 or more), each splayed 15 degrees or more to opposite sides, ankles 0.9 or more apart; both arms up or out |
 | jumping (tuck) | torso within 25 degrees of vertical; both legs whole with knees bent (110 or less), both knees 0.25 or more above the hips, feet still 0.2 or more below the hips |
-| standing | every visible leg: thigh within 35 degrees of down, visible thigh 0.55 or longer, knee 150 or straighter |
+| standing | every visible leg: thigh within 35 degrees of down, visible thigh 0.55 or longer, knee 150 or straighter, visible shin 0.5 or longer (a short straight shin is a frontal view of someone kneeling upright) |
 | seated | every visible leg is one of: a chair sit (thigh 55 degrees or more from down, knee no more than 0.25 above the hip, knee angle 70 or more, shin hanging 0.4 or more, feet 0.6 or more below the hips); legs out on the floor (thigh 55 or more, knee 140 or more, feet within 0.5 of hip height); thighs toward the camera (visible thigh under 0.45, knee not above the hip, shin hanging 0.5 or more, feet 0.7 or more below the hips) |
 | crouching | every whole leg is bent (110 or less) with the hips within 0.8 of the ankles |
 | unknown | anything else |
@@ -220,8 +220,11 @@ only one is visible, and `unknown` when neither is.
 
 The subject's facing as the camera sees it: `left` means they face the image's left.
 
-- **Profile** when exactly one shoulder is confident, or both are and their separation across the body is under
-  0.35 of the torso scale (frontal adults show about 0.7, a three-quarter view about 0.5). Then the nose decides: 0.05
+- **Profile** when exactly one shoulder is confident and the face is not seen from the front, or both are and their
+  separation across the body is under 0.35 of the torso scale (frontal adults show about 0.7, a three-quarter view
+  about 0.5). The face is seen from the front when both eyes are confident and the nose, if confident, lies between
+  them across the body: then one shoulder is a frontal shot cropped at one side, and facing is `unknown` (with one
+  shoulder the shoulder order cannot be checked). In a profile the nose decides: 0.05
   or more to the left of the ears (or the shoulders, without confident ears) is `left`, to the right is `right`. No
   nose, an offset under 0.05, or a torso more than 60 degrees from vertical (left and right of the image mean
   nothing for a lying subject) is `unknown`.
@@ -240,13 +243,19 @@ What one 2D frame cannot decide, and how the rules behave:
 - **The camera is assumed level.** A strongly tilted camera tilts every stance; a photo shot straight down at a
   lying person looks upright.
 - **Cross-legged floor sitting** has bent knees with the feet near hip height, so it reads as crouching.
-  **Kneeling** reads as unknown or crouching. Neither is a label.
+  **Kneeling** reads as unknown or crouching (a frontal view of upright kneeling, with its short shin, is unknown).
+  Neither is a label.
+- **Sitting on a low stool** seen from the front, knees a little above the hips, reads as crouching.
 - **Profile arms are measured in the image plane:** an arm reaching toward the camera foreshortens and can read as
   down.
 - **One visible arm or leg decides alone** (the occluded one is assumed to agree), which can mislabel `mixed` arms
   in profile.
 - **Facing trusts the estimator's left/right assignment.** Pose estimators sometimes swap sides on back views; the
-  face-visibility cross-check turns most such swaps into `unknown` rather than a wrong label.
+  face-visibility cross-check turns most such swaps into `unknown` rather than a wrong label. A back view with
+  swapped sides **and** face landmarks the estimator hallucinated at 0.3 or more passes both checks and reads
+  `front`.
+- **A frontal shot cropped through the face** (one shoulder, that side's ear and eye out of frame) looks like a
+  profile to the rules and reads `left` or `right`; the frontal-face check needs both eyes.
 - **Synthetic tests only.** The rules are tested on parametric stick figures with jitter, dropout, scale,
   translation and mirroring; their accuracy on real photographs has not yet been measured.
 
