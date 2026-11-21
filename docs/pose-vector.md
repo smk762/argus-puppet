@@ -74,13 +74,16 @@ not count as a wrist at the hip.
 
 ### Unusable poses
 
-`embed()` returns `None` (the image is not usable) when:
+`embed()` returns `None` (the image is not usable) when one of these holds; `embed_or_reason()` returns the reason
+instead, the first that applies, in this order (the set metrics put it on the wire, see
+[metrics.md](metrics.md#why-a-pose-is-unusable)):
 
 - no hip or no shoulder is confident (there is no anchor to centre or scale on; rules 2 and 3 above only complete a
-  pair);
-- the scale `S` is under 4 pixels (noise, not a person);
-- fewer than `min_usable_joints` (default 8) body joints are confident. Eight admits an upper-body shot with the
-  hips in frame (head 5 + shoulders 2 + hips 2 = 9 before any limb) and refuses a head-and-shoulders portrait.
+  pair): `no_confident_torso` (neither), `no_confident_hip` or `no_confident_shoulder`;
+- the scale `S` is under 4 pixels (noise, not a person): `scale_too_small`;
+- fewer than `min_usable_joints` (default 8) body joints are confident: `too_few_joints`. Eight admits an upper-body
+  shot with the hips in frame (head 5 + shoulders 2 + hips 2 = 9 before any limb) and refuses a head-and-shoulders
+  portrait.
 
 ### Not rotation-invariant
 

@@ -159,9 +159,29 @@ def test_unusable_outputs_are_listed_unmatched_and_left_out_of_the_share() -> No
         m = by[unmatched]
         assert m.nearest is None and m.distance is None and m.shared_joints is None and not m.close
     assert by["ok.png"].nearest == "t.png" and by["ok.png"].close
+    # only the unusable output carries a reason: sparse.png is usable, just comparable with nothing
+    assert [by[i].unusable_reason for i in ("none.png", "ok.png", "sparse.png")] == ["no_person", None, None]
+    assert cmp.output_unusable_reasons == {"no_person": 1} and cmp.reference_unusable_reasons == {}
     assert (cmp.output_count, cmp.matched_count, cmp.close_eligible) == (3, 1, 1)
     assert cmp.close_share == 1.0  # over the eligible output only
     assert PoseSetComparison.model_validate_json(cmp.model_dump_json()) == cmp
+
+
+def test_unusable_reasons_on_both_sides() -> None:
+    legs = make("standing", dropout=(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+    outputs = [result("legs.png", legs), result("ok.png", make("t_pose"))]
+    reference = [result("r_legs.png", legs), result("r_none.png", None), result("t.png", make("t_pose"))]
+    cmp = compare_pose_sets(outputs, reference)
+    by = {m.image: m for m in cmp.matches}
+    assert by["legs.png"].unusable_reason == "no_confident_shoulder" and by["legs.png"].nearest is None
+    assert by["ok.png"].unusable_reason is None
+    assert cmp.output_unusable_reasons == {"no_confident_shoulder": 1}
+    assert cmp.reference_unusable_reasons == {"no_person": 1, "no_confident_shoulder": 1}
+    assert cmp.reference_count == 1
+    data = cmp.model_dump()
+    data["output_unusable_reasons"] = {"too_few_joints": 1}
+    with pytest.raises(ValueError, match="output_unusable_reasons"):
+        PoseSetComparison.model_validate(data)
 
 
 def test_params_are_honoured_and_recorded() -> None:

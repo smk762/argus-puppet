@@ -160,7 +160,8 @@ cluster id, and its provenance: the source image's name and SHA-256.
    confident hip and shoulder to anchor on and 8 confident body joints; see
    [pose-vector.md](pose-vector.md#unusable-poses)). A pose the vector cannot embed could never be compared,
    deduplicated or clustered, so it would sit in a cluster of its own and stratified sampling would favour it; such
-   images are counted as `unembeddable` and skipped, as are images with nobody usable. Each entry is labelled
+   images are counted as `unembeddable` (split by [reason](metrics.md#why-a-pose-is-unusable) in
+   `unembeddable_reasons`) and skipped, as are images with nobody usable. Each entry is labelled
    (stance, arms, facing; `labels.pose_labels`). Entry ids are derived from the source image's hash and the
    keypoints, so rebuilding from the same inputs gives the same ids.
 4. **Age check** (optional, `age_gate`; on with real-person sources): see below.

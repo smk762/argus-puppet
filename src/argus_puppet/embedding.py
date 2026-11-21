@@ -13,6 +13,7 @@ Everything here is pure numpy and deterministic.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, get_args
 
 import numpy as np
 
@@ -102,6 +103,27 @@ HIP_TO_SHOULDER_WIDTH = 0.7
 MAX_COORD = 1e6
 
 
+# ── why a pose is unusable ───────────────────────────────────────────────────────────────────────────────────────
+
+# Every way the set metrics refuse an image's pose, in the order the checks run (the first failing check names it):
+#   no_person              the image has no primary person (decided by metrics.embed_set; never by embed)
+#   no_confident_torso     neither a confident hip nor a confident shoulder (_anchor_points)
+#   no_confident_hip       a confident shoulder but no confident hip, e.g. a waist-up crop (_anchor_points)
+#   no_confident_shoulder  a confident hip but no confident shoulder, e.g. a legs crop (_anchor_points)
+#   scale_too_small        the robust torso scale is under MIN_SCALE_PX (torso_frame)
+#   too_few_joints         fewer than min_usable_joints confident body joints (embed)
+UnusableReason = Literal[
+    "no_person",
+    "no_confident_torso",
+    "no_confident_hip",
+    "no_confident_shoulder",
+    "scale_too_small",
+    "too_few_joints",
+]
+UNUSABLE_REASONS: tuple[UnusableReason, ...] = get_args(UnusableReason)
+NO_PERSON: UnusableReason = "no_person"
+
+
 @dataclass(frozen=True)
 class TorsoFrame:
     """The anchor of one person: where the mid-hip is, how big a torso is, and which way it points (pixels)."""
@@ -143,9 +165,10 @@ def confident(keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOINT_
     return (kp[:, 2] >= min_joint_score) & _placed(kp)
 
 
-def _anchor_points(kp: np.ndarray, min_joint_score: float) -> dict[int, np.ndarray] | None:
-    """The four anchor joints (hips, shoulders) as the torso frame uses them, or ``None`` when it cannot be placed:
-    without at least one confident hip and one confident shoulder.
+def _anchor_points(kp: np.ndarray, min_joint_score: float) -> dict[int, np.ndarray] | UnusableReason:
+    """The four anchor joints (hips, shoulders) as the torso frame uses them, or why it cannot be placed: without at
+    least one confident hip and one confident shoulder (``no_confident_torso``, ``no_confident_hip`` or
+    ``no_confident_shoulder``).
 
     A joint is taken as it is when it is confident, or when its score is at least :data:`ANCHOR_MIN_SCORE` (a
     doubtful joint still marks where the body is). A joint missing below that is estimated from the other pair when
@@ -154,8 +177,14 @@ def _anchor_points(kp: np.ndarray, min_joint_score: float) -> dict[int, np.ndarr
     the pair stands in for its midpoint: right in profile, where the pair nearly coincides.
     """
     ok = confident(kp, min_joint_score)
-    if not (ok[L_HIP] or ok[R_HIP]) or not (ok[L_SHOULDER] or ok[R_SHOULDER]):
-        return None  # a doubtful joint completes a pair; it never anchors a pose on its own
+    # A doubtful joint completes a pair; it never anchors a pose on its own.
+    has_hip, has_shoulder = bool(ok[L_HIP] or ok[R_HIP]), bool(ok[L_SHOULDER] or ok[R_SHOULDER])
+    if not (has_hip or has_shoulder):
+        return "no_confident_torso"
+    if not has_hip:
+        return "no_confident_hip"
+    if not has_shoulder:
+        return "no_confident_shoulder"
     floor = min(min_joint_score, ANCHOR_MIN_SCORE)
     usable = (kp[:, 2] >= floor) & _placed(kp)
     pts = {j: kp[j, :2].copy() for j in (L_HIP, R_HIP, L_SHOULDER, R_SHOULDER) if usable[j]}
@@ -169,8 +198,7 @@ def _anchor_points(kp: np.ndarray, min_joint_score: float) -> dict[int, np.ndarr
             elif b in pts and a not in pts:
                 estimates[a] = pts[b] + ratio * (pts[oa] - pts[ob])
     pts.update(estimates)
-    if not ({L_HIP, R_HIP} & pts.keys()) or not ({L_SHOULDER, R_SHOULDER} & pts.keys()):
-        return None
+    # Every confident joint clears the floor (floor <= min_joint_score), so pts holds a hip and a shoulder here.
     return pts
 
 
@@ -181,7 +209,16 @@ def _mid(pts: dict[int, np.ndarray], a: int, b: int) -> np.ndarray:
 
 
 def torso_frame(keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOINT_SCORE) -> TorsoFrame | None:
-    """The anchor and robust scale of one person's ``(133, 3)`` keypoints, or ``None`` when it cannot be placed.
+    """The anchor and robust scale of one person, or ``None`` when it cannot be placed (see :func:`torso_frame_or_reason`
+    for the details and for why)."""
+    frame = torso_frame_or_reason(keypoints, min_joint_score)
+    return frame if isinstance(frame, TorsoFrame) else None
+
+
+def torso_frame_or_reason(
+    keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOINT_SCORE
+) -> TorsoFrame | UnusableReason:
+    """The anchor and robust scale of one person's ``(133, 3)`` keypoints, or why it cannot be placed.
 
     The centre is the midpoint of the hips and the mid-shoulder the midpoint of the shoulders, read from the anchor
     joints of :func:`_anchor_points`: a hip or shoulder scoring under *min_joint_score* still anchors when it scores
@@ -193,13 +230,14 @@ def torso_frame(keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOIN
 
         max(|mid_shoulder - mid_hip|, 1.2 * shoulder_width, 1.5 * hip_width)
 
-    with a width counted when both of its anchor joints are known. ``None`` without a hip and a shoulder to anchor
-    on (no confident hip or no confident shoulder), or when the scale is under :data:`MIN_SCALE_PX`.
+    with a width counted when both of its anchor joints are known. An :data:`UnusableReason` without a hip and a
+    shoulder to anchor on (``no_confident_torso`` / ``no_confident_hip`` / ``no_confident_shoulder``), or when the
+    scale is under :data:`MIN_SCALE_PX` (``scale_too_small``).
     """
     kp = _check(keypoints)
     pts = _anchor_points(kp, min_joint_score)
-    if pts is None:
-        return None
+    if isinstance(pts, str):
+        return pts
     mid_hip = _mid(pts, L_HIP, R_HIP)
     mid_shoulder = _mid(pts, L_SHOULDER, R_SHOULDER)
     torso = float(np.hypot(*(mid_shoulder - mid_hip)))
@@ -210,7 +248,7 @@ def torso_frame(keypoints: np.ndarray, min_joint_score: float = DEFAULT_MIN_JOIN
         candidates.append(HIP_WIDTH_TO_TORSO * float(np.hypot(*(pts[L_HIP] - pts[R_HIP]))))
     scale = max(candidates)
     if not np.isfinite(scale) or scale < MIN_SCALE_PX:
-        return None
+        return "scale_too_small"
     return TorsoFrame(mid_hip=mid_hip, mid_shoulder=mid_shoulder, torso_px=torso, scale_px=scale)
 
 
@@ -241,18 +279,32 @@ def embed(
     min_joint_score: float = DEFAULT_MIN_JOINT_SCORE,
     min_usable_joints: int = DEFAULT_MIN_USABLE_JOINTS,
 ) -> PoseVector | None:
-    """The pose vector of one person's ``(133, 3)`` keypoints, or ``None`` when it is unusable.
+    """The pose vector of one person's ``(133, 3)`` keypoints, or ``None`` when it is unusable (see
+    :func:`embed_or_reason` for why)."""
+    v = embed_or_reason(keypoints, min_joint_score=min_joint_score, min_usable_joints=min_usable_joints)
+    return v if isinstance(v, PoseVector) else None
 
-    Unusable means: no hip or no shoulder to anchor on (see :func:`torso_frame`), a scale under
-    :data:`MIN_SCALE_PX`, or fewer than *min_usable_joints* confident body joints.
+
+def embed_or_reason(
+    keypoints: np.ndarray,
+    *,
+    min_joint_score: float = DEFAULT_MIN_JOINT_SCORE,
+    min_usable_joints: int = DEFAULT_MIN_USABLE_JOINTS,
+) -> PoseVector | UnusableReason:
+    """The pose vector of one person's ``(133, 3)`` keypoints, or the :data:`UnusableReason` it is unusable.
+
+    Unusable means, checked in this order: no hip or no shoulder to anchor on (``no_confident_torso``,
+    ``no_confident_hip``, ``no_confident_shoulder``; see :func:`torso_frame_or_reason`), a scale under
+    :data:`MIN_SCALE_PX` (``scale_too_small``), or fewer than *min_usable_joints* confident body joints
+    (``too_few_joints``). This is the one place the decision is made; :func:`embed` is this without the reason.
     """
     kp = _check(keypoints)
-    frame = torso_frame(kp, min_joint_score)
-    if frame is None:
-        return None
+    frame = torso_frame_or_reason(kp, min_joint_score)
+    if isinstance(frame, str):
+        return frame
     mask = confident(kp, min_joint_score)[BODY].copy()
     if int(mask.sum()) < min_usable_joints:
-        return None
+        return "too_few_joints"
     coords = (kp[BODY, :2] - frame.mid_hip) / frame.scale_px
     coords[~mask] = 0.0
     mask.setflags(write=False)

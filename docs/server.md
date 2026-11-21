@@ -7,8 +7,10 @@ publishes it on the host's loopback (see [deploy.md](deploy.md)). The app is `ar
 
 Every request and response body is a type from `src/argus_puppet/models.py`, the wire contract. Its field
 descriptions are authoritative and are rendered to `schema/puppet-wire.schema.json`. Top-level documents carry
-`puppet_version` (currently `"1.1"`); a 1.x reader ignores fields it does not know, and every 1.x reader accepts a
-1.0 document. 1.1 added `PersonPose.labels` (see [`POST /pose`](#post-pose)).
+`puppet_version` (currently `"1.2"`); a 1.x reader ignores fields it does not know, and every 1.x reader accepts a
+1.0 document. 1.1 added `PersonPose.labels` (see [`POST /pose`](#post-pose)). 1.2 added why a pose is unusable:
+`unusable_reason` on `/stats` items and `/compare` matches, with counts by reason beside them (see
+[`POST /stats`](#post-stats)).
 
 ## Routes
 
@@ -35,7 +37,7 @@ curl -s http://<PUPPET_HOST>:8220/health
 ```
 
 ```json
-{"puppet_version": "1.1", "version": "0.2.0", "read_only": false,
+{"puppet_version": "1.2", "version": "0.2.0", "read_only": false,
  "models": {"dwpose-l-384x288": true, "dwpose-m-256x192": true, "yolox_m": true, "yolox_nano": true},
  "pose_model": "dwpose-l-384x288", "detector_model": "yolox_m",
  "provider": null, "device": "cpu", "gpu_coordinator": "none", "free_vram_mb": null}
@@ -191,12 +193,22 @@ curl -s -X POST -H 'content-type: application/json' \
   -d '{"path": "lora-outputs/run-12"}' http://<PUPPET_HOST>:8220/stats
 ```
 
-The answer is a `PoseSetStats`: `count`, `usable`, `comparable_pairs` and `comparable_share` (how many usable pairs
+The answer is a `PoseSetStats`: `count`, `usable`, `unusable_reasons` (how many images are unusable for each
+reason, only reasons that occur), `comparable_pairs` and `comparable_share` (how many usable pairs
 the scores could compare), `diversity` (0 to 1; argus-proof's pose-diversity gate reads this, beside
 `largest_cluster_share`), `mean_pairwise_distance`, `cluster_count`, `largest_cluster_share`, `clusters` (largest first, each with a
 `medoid` image), `coverage` (counts per stance, arms and facing label), `items` (one per image, with its cluster,
 labels and a 2D point for a scatter plot), the `params` used, and the shared `estimator` when every pose came from
-the same one.
+the same one. An unusable item has `usable: false` and an `unusable_reason`:
+
+```json
+{"image": "legs-crop.jpg", "usable": false, "unusable_reason": "no_confident_shoulder", "cluster": null,
+ "labels": {"stance": "unknown", "arms": "unknown", "facing": "unknown"}, "xy": null}
+```
+
+The reasons are `no_person`, `no_confident_torso`, `no_confident_hip`, `no_confident_shoulder`, `scale_too_small`
+and `too_few_joints` ([metrics.md](metrics.md#why-a-pose-is-unusable)); `unusable_reason` is null on a usable item
+and absent from documents before 1.2. A crop without the shoulders or hips in frame is correctly unusable.
 
 ### `POST /compare`
 
@@ -219,7 +231,8 @@ curl -s -X POST -H 'content-type: application/json' \
 ```
 
 The answer is a `PoseSetComparison`: one `matches` entry per output (`nearest`, `distance`, `shared_joints`,
-`close`), `output_count`, `matched_count`, `reference_count`, `close_eligible` and `close_share`, the reference set's
+`close`, and `unusable_reason` for an unusable output), `output_count`, `matched_count`, `reference_count`,
+`output_unusable_reasons` and `reference_unusable_reasons`, `close_eligible` and `close_share`, the reference set's
 own leave-one-out `baseline_close_share` and `close_excess`, nearest-distance quantiles for both sides, the
 `coverage_divergence` between the two sets' label mixes, both coverages, the threshold and params used.
 
@@ -235,7 +248,7 @@ Each set counts against the set cap separately, so one request can carry two set
 One pose to an OpenPose-convention skeleton PNG for a pose ControlNet.
 
 ```json
-{"pose": {"puppet_version": "1.1", "image": "photo.jpg", "...": "a whole PoseResult"},
+{"pose": {"puppet_version": "1.2", "image": "photo.jpg", "...": "a whole PoseResult"},
  "options": {"width": 1024, "height": 1024, "face": false, "stroke_scale": "auto"}}
 ```
 

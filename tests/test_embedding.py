@@ -9,17 +9,20 @@ from posegen import PRESETS, make
 from argus_puppet import embedding
 from argus_puppet.embedding import (
     BODY_FLIP,
+    UNUSABLE_REASONS,
     PoseVector,
     align_to_mean,
     canonicalize,
     cross_distances,
     embed,
+    embed_or_reason,
     mirror,
     mirror_vector,
     pairwise_distances,
     pose_distance,
     stack,
     torso_frame,
+    torso_frame_or_reason,
 )
 from argus_puppet.skeleton import FACE, LEFT_HAND, Joint, flip_horizontal
 
@@ -96,6 +99,56 @@ def test_too_few_joints_is_unusable() -> None:
 
 def test_a_tiny_person_is_unusable() -> None:
     assert embed(make("standing", scale=2.0)) is None
+
+
+# ── why a pose is unusable ───────────────────────────────────────────────────────────────────────────────────────
+
+HIPS = (Joint.LEFT_HIP, Joint.RIGHT_HIP)
+SHOULDERS = (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)
+ABOVE_THE_HIPS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+UNUSABLE_CASES = [
+    ("no_confident_torso", make("standing", dropout=HIPS + SHOULDERS)),
+    ("no_confident_hip", make("standing", dropout=HIPS)),
+    ("no_confident_shoulder", make("standing", dropout=SHOULDERS)),
+    # a legs crop: everything above the hips out of frame, the hips and legs confident (10 joints: count is fine)
+    ("no_confident_shoulder", make("standing", dropout=ABOVE_THE_HIPS)),
+    ("scale_too_small", make("standing", scale=2.0)),
+    ("too_few_joints", make("standing", dropout=(7, 8, 9, 10, 13, 14, 15, 16, 1, 2, 3, 4))),
+]
+
+
+@pytest.mark.parametrize(("reason", "kp"), UNUSABLE_CASES)
+def test_every_unusable_pose_names_its_reason(reason: str, kp: np.ndarray) -> None:
+    assert embed_or_reason(kp) == reason
+    assert embed(kp) is None  # embed is embed_or_reason without the reason
+
+
+def test_the_reason_set_is_closed_and_covered() -> None:
+    assert set(UNUSABLE_REASONS) == {r for r, _ in UNUSABLE_CASES} | {"no_person"}  # no_person is metrics' call
+
+
+def test_doubtful_anchor_joints_name_the_missing_pair() -> None:
+    for pair, reason in ((HIPS, "no_confident_hip"), (SHOULDERS, "no_confident_shoulder")):
+        kp = make("standing")
+        kp[list(pair), 2] = 0.2  # above the anchor floor, below the joint threshold: still no confident one
+        assert embed_or_reason(kp) == reason and torso_frame_or_reason(kp) == reason
+
+
+def test_anchor_reasons_come_before_scale_and_count() -> None:
+    tiny_legs = make("standing", scale=2.0, dropout=ABOVE_THE_HIPS)
+    assert embed_or_reason(tiny_legs) == "no_confident_shoulder"
+    tiny_sparse = make("standing", scale=2.0, dropout=(7, 8, 9, 10, 13, 14, 15, 16, 1, 2, 3, 4))
+    assert embed_or_reason(tiny_sparse) == "scale_too_small"
+
+
+def test_a_usable_pose_has_a_vector_and_no_reason() -> None:
+    kp = make("walk")
+    v = embed_or_reason(kp)
+    assert isinstance(v, PoseVector)
+    ref = embed(kp)
+    assert ref is not None and np.array_equal(v.coords, ref.coords) and np.array_equal(v.mask, ref.mask)
+    frame, plain = torso_frame_or_reason(kp), torso_frame(kp)
+    assert not isinstance(frame, str) and plain is not None and frame.scale_px == plain.scale_px
 
 
 def test_foreshortened_torso_takes_the_scale_from_the_shoulders() -> None:

@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 from posegen import PRESETS, make, result
 
+from argus_puppet.embedding import UNUSABLE_REASONS
 from argus_puppet.metrics import (
     ARMS,
     DEFAULT_PARAMS,
@@ -16,7 +17,7 @@ from argus_puppet.metrics import (
     diversity,
     pose_set_stats,
 )
-from argus_puppet.models import SIDECAR_SUFFIX, MetricParams, PoseSetStats
+from argus_puppet.models import SIDECAR_SUFFIX, MetricParams, PoseSetItem, PoseSetStats
 from argus_puppet.sidecars import SidecarError, load_sidecars
 
 NAMES = list(PRESETS)
@@ -69,6 +70,95 @@ def test_unusable_items_keep_their_labels_but_stay_out_of_the_numbers() -> None:
     item = s.items[0]
     assert not item.usable and item.labels.arms == "up"
     assert sum(s.coverage.arms.values()) == 1 and s.coverage.arms["out"] == 1
+
+
+# ── why a pose is unusable ───────────────────────────────────────────────────────────────────────────────────────
+
+ABOVE_THE_HIPS = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+
+
+def unusable_set() -> list:
+    """One image for every unusable reason (two legs crops), among usable poses."""
+    return [
+        result("u_none.png", None),
+        result("u_torso.png", make("standing", dropout=(5, 6, 11, 12))),
+        result("u_hip.png", make("t_pose", dropout=(11, 12))),
+        result("u_legs1.png", make("walk", dropout=ABOVE_THE_HIPS)),
+        result("u_legs2.png", make("standing", dropout=ABOVE_THE_HIPS)),
+        result("u_tiny.png", make("standing", scale=2.0)),
+        result("u_sparse.png", make("arms_up", dropout=(1, 2, 3, 4, 13, 14, 15, 16, 7, 8))),
+        *sample(np.random.default_rng(3), NAMES, 30),
+    ]
+
+
+EXPECTED_REASONS = {
+    "u_none.png": "no_person",
+    "u_torso.png": "no_confident_torso",
+    "u_hip.png": "no_confident_hip",
+    "u_legs1.png": "no_confident_shoulder",
+    "u_legs2.png": "no_confident_shoulder",
+    "u_tiny.png": "scale_too_small",
+    "u_sparse.png": "too_few_joints",
+}
+
+
+def test_every_unusable_item_names_its_reason_and_the_stats_count_them() -> None:
+    s = pose_set_stats(unusable_set())
+    reasons = {i.image: i.unusable_reason for i in s.items if not i.usable}
+    assert reasons == EXPECTED_REASONS
+    assert all(i.unusable_reason is None for i in s.items if i.usable)
+    assert s.unusable_reasons == {
+        "no_person": 1,
+        "no_confident_torso": 1,
+        "no_confident_hip": 1,
+        "no_confident_shoulder": 2,
+        "scale_too_small": 1,
+        "too_few_joints": 1,
+    }
+    assert list(s.unusable_reasons) == [r for r in UNUSABLE_REASONS if r in s.unusable_reasons]  # canonical order
+    assert sum(s.unusable_reasons.values()) == s.count - s.usable
+    assert PoseSetStats.model_validate_json(s.model_dump_json()) == s
+
+
+def test_an_all_usable_set_has_no_reasons() -> None:
+    s = pose_set_stats(sample(np.random.default_rng(1), NAMES, 10))
+    assert s.usable == s.count and s.unusable_reasons == {}
+    assert all(i.unusable_reason is None for i in s.items)
+
+
+def _metric_fields(s: PoseSetStats) -> dict:
+    out = s.model_dump(exclude={"unusable_reasons", "items", "count"})
+    out["items"] = [(i.image, i.usable, i.cluster, i.xy) for i in s.items if i.usable]
+    return out
+
+
+def test_reasons_never_change_a_metric() -> None:
+    mixed = unusable_set()
+    s = pose_set_stats(mixed)
+    # The same images with every unusable pose replaced by nobody: every reason becomes no_person, nothing else moves.
+    nobody = [result(r.image, None) if r.image in EXPECTED_REASONS else r for r in mixed]
+    t = pose_set_stats(nobody)
+    assert set(t.unusable_reasons) == {"no_person"}
+    assert _metric_fields(s) == _metric_fields(t)
+    # And the usable images alone give the same numbers.
+    alone = pose_set_stats([r for r in mixed if r.image not in EXPECTED_REASONS])
+    assert alone.unusable_reasons == {} and _metric_fields(alone) == _metric_fields(s)
+
+
+def test_reason_counts_must_cover_the_unusable_images_but_may_be_absent() -> None:
+    data = json.loads(pose_set_stats(unusable_set()).model_dump_json())
+    data["unusable_reasons"]["no_person"] = 5
+    with pytest.raises(ValueError, match="unusable_reasons"):
+        PoseSetStats.model_validate(data)
+    # a 1.1 payload: no reasons anywhere, still reads
+    data["puppet_version"] = "1.1"
+    data.pop("unusable_reasons")
+    for item in data["items"]:
+        item.pop("unusable_reason")
+    old = PoseSetStats.model_validate(data)
+    assert old.unusable_reasons == {} and all(i.unusable_reason is None for i in old.items)
+    with pytest.raises(ValueError, match="usable item"):
+        PoseSetItem(image="a.png", usable=True, unusable_reason="too_few_joints")
 
 
 def test_n_identical_poses_have_zero_diversity_and_one_cluster() -> None:

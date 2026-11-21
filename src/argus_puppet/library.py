@@ -34,13 +34,14 @@ from PIL import Image
 
 from argus_puppet.age import ADULT_AGE, AgeEstimator, AgeUnavailable
 from argus_puppet.compare import DEFAULT_CLOSE_THRESHOLD
-from argus_puppet.embedding import CORE_JOINTS, PoseVector, embed, mirror
+from argus_puppet.embedding import CORE_JOINTS, PoseVector, UnusableReason, embed_or_reason, mirror
 from argus_puppet.labels import pose_labels
 from argus_puppet.metrics import (
     DEFAULT_PARAMS,
     average_linkage,
     cluster_ids,
     keypoint_distance_matrix,
+    reason_counts,
     shared_estimator,
 )
 from argus_puppet.models import (
@@ -158,6 +159,8 @@ class LibraryBuild:
     unembeddable: int = (
         0  # primary person the pose vector cannot use under the default params (no anchor, too few joints)
     )
+    # unembeddable by embedding.UnusableReason (only reasons that occur, in UNUSABLE_REASONS order; never 'no_person')
+    unembeddable_reasons: dict[UnusableReason, int] = field(default_factory=dict)
     duplicate_ids: int = 0  # the same image (and pose) seen twice
     under_age: int = 0  # age check on: a face or body read under 18
     age_unchecked: int = 0  # age check on: the check could not vouch for the image (fails closed)
@@ -207,8 +210,9 @@ def build_library(
 ) -> LibraryBuild:
     """Build a library from pose results: one entry per image's usable primary person, labelled by *labeler*. A
     primary person is usable when their mean body score is at least *min_body_score* and the pose vector can embed
-    them under the default metric params (``unembeddable`` counts the ones it cannot: no hip or shoulder to anchor
-    on, or too few confident joints; such a pose could never be compared, deduplicated or clustered).
+    them under the default metric params (``unembeddable`` counts the ones it cannot, and ``unembeddable_reasons``
+    splits that count by :data:`embedding.UnusableReason`: no hip or shoulder to anchor on, a degenerate scale, or too
+    few confident joints; such a pose could never be compared, deduplicated or clustered).
 
     Then, in order: entries with the same id (same image, same pose) collapse to the first; with *age_gate*, every
     remaining image goes through the age check and is kept only when it passes (failing closed, see the module
@@ -224,6 +228,7 @@ def build_library(
     seen: set[str] = set()
     build = LibraryBuild(library=PoseLibrary(created_from=created_from))
     all_results: list[PoseResult] = []
+    unembeddable_why: list[UnusableReason] = []
     for result in results:
         build.considered += 1
         all_results.append(result)
@@ -235,8 +240,9 @@ def build_library(
             build.low_score += 1
             continue
         vector = _embed(entry.keypoints_array())
-        if vector is None:
+        if not isinstance(vector, PoseVector):
             build.unembeddable += 1
+            unembeddable_why.append(vector)
             continue
         if entry.id in seen:
             build.duplicate_ids += 1
@@ -284,6 +290,7 @@ def build_library(
             build.dropped += [e.source_image for i, e in enumerate(entries) if i not in picked]
             entries = [e for i, e in enumerate(entries) if i in picked]
 
+    build.unembeddable_reasons = reason_counts(unembeddable_why)
     position = {e.id: i for i, (_, e) in enumerate(pairs)}
     entries.sort(key=lambda e: position[e.id])  # back to input order
     build.library = PoseLibrary(
@@ -299,6 +306,7 @@ def build_library(
         no_person=build.no_person,
         low_score=build.low_score,
         unembeddable=build.unembeddable,
+        unembeddable_reasons=build.unembeddable_reasons,
         duplicate_ids=build.duplicate_ids,
         age_check=age_gate is not None,
         under_age=build.under_age,
@@ -309,8 +317,8 @@ def build_library(
     return build
 
 
-def _embed(keypoints: np.ndarray) -> PoseVector | None:
-    return embed(
+def _embed(keypoints: np.ndarray) -> PoseVector | UnusableReason:
+    return embed_or_reason(
         keypoints, min_joint_score=DEFAULT_PARAMS.min_joint_score, min_usable_joints=DEFAULT_PARAMS.min_usable_joints
     )
 

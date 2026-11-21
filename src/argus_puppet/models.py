@@ -33,12 +33,16 @@ from argus_puppet.embedding import (
     DEFAULT_MIN_SHARED_LIMB_JOINTS,
     DEFAULT_MIN_USABLE_JOINTS,
     NUM_CORE_JOINTS,
+    UNUSABLE_REASONS,
+    UnusableReason,
 )
 from argus_puppet.skeleton import LAYOUT, NUM_KEYPOINTS, part_mean_scores
 
 # 1.0: initial contract.
 # 1.1: PersonPose.labels (stance / arms / facing per person, filled by extraction; optional, null in 1.0 payloads).
-PUPPET_VERSION = "1.1"
+# 1.2: why a pose is unusable: PoseSetItem.unusable_reason and PoseSetStats.unusable_reasons; PoseMatch.unusable_reason
+#      and PoseSetComparison.output_unusable_reasons / reference_unusable_reasons (optional; null / {} before 1.2).
+PUPPET_VERSION = "1.2"
 SUPPORTED_PUPPET_MAJORS: tuple[str, ...] = ("1",)
 WIRE_TITLE = "argus-puppet wire contract"
 # The committed schema, relative to the repo root (``argus-puppet schema`` writes it, ``--check`` compares).
@@ -242,6 +246,24 @@ class Coverage(BaseModel):
     facing: dict[Facing, Count] = Field(default_factory=dict, description="Count per facing label.")
 
 
+_REASONS_HELP = (
+    "'no_person' (no primary person), 'no_confident_torso' (neither a hip nor a shoulder at params.min_joint_score), "
+    "'no_confident_hip' (a shoulder but no hip, e.g. a waist-up crop), 'no_confident_shoulder' (a hip but no "
+    "shoulder, e.g. a legs crop), 'scale_too_small' (torso under 4 px), 'too_few_joints' (fewer than "
+    "params.min_usable_joints confident body joints); the first failing check, in that order (docs/metrics.md)"
+)
+UnusableReasons = Annotated[
+    dict[UnusableReason, Count],
+    AfterValidator(lambda d: {k: d[k] for k in UNUSABLE_REASONS if d.get(k)}),
+]
+
+
+def _check_reason_counts(reasons: dict[str, int], unusable: int, what: str) -> None:
+    # Empty is what a pre-1.2 payload carries; otherwise the counts cover every unusable image exactly.
+    if reasons and sum(reasons.values()) != unusable:
+        raise ValueError(f"{what} sum to {sum(reasons.values())}, not the {unusable} unusable images")
+
+
 class PoseSetItem(BaseModel):
     """One image of a set, as the set metrics saw it."""
 
@@ -249,11 +271,22 @@ class PoseSetItem(BaseModel):
     usable: bool = Field(
         ..., description="Whether it had a primary person with enough confident joints to embed (see params)."
     )
+    unusable_reason: UnusableReason | None = Field(
+        None,
+        description="Why it is not usable: " + _REASONS_HELP + ". Null when usable (and in payloads before "
+        "puppet_version 1.2).",
+    )
     cluster: int | None = Field(None, ge=0, description="The PoseCluster.id it fell in; null when not usable.")
     labels: PoseLabels = Field(default_factory=PoseLabels)
     xy: tuple[float, float] | None = Field(
         None, description="2-D projection of its pose vector for a scatter plot; null when not usable."
     )
+
+    @model_validator(mode="after")
+    def _reason_agrees(self) -> PoseSetItem:
+        if self.usable and self.unusable_reason is not None:
+            raise ValueError("a usable item has no unusable_reason")
+        return self
 
 
 class PoseCluster(BaseModel):
@@ -326,6 +359,12 @@ class PoseSetStats(_Versioned):
 
     count: int = Field(..., ge=0, description="Images in the set.")
     usable: int = Field(..., ge=0, description="Images with a usable primary pose.")
+    unusable_reasons: UnusableReasons = Field(
+        default_factory=dict,
+        description="How many images are unusable for each reason (items' unusable_reason), listing only reasons "
+        "that occur, so it sums to count - usable and is empty when every image is usable (and in payloads before "
+        "puppet_version 1.2).",
+    )
     comparable_pairs: int = Field(
         ...,
         ge=0,
@@ -360,6 +399,7 @@ class PoseSetStats(_Versioned):
     def _counts_agree(self) -> PoseSetStats:
         if self.usable > self.count:
             raise ValueError(f"usable {self.usable} exceeds count {self.count}")
+        _check_reason_counts(self.unusable_reasons, self.count - self.usable, "unusable_reasons")
         if self.comparable_pairs > self.usable * (self.usable - 1) // 2:
             raise ValueError(f"comparable_pairs {self.comparable_pairs} exceeds the {self.usable} usable poses' pairs")
         if self.cluster_count != len(self.clusters):
@@ -404,6 +444,11 @@ class PoseMatch(BaseModel):
         "'a copied frame': most same-stance poses match at the default threshold. Use it as a pointer to the training "
         "frame an image-level check should compare against; the run-level signal is close_excess.",
     )
+    unusable_reason: UnusableReason | None = Field(
+        None,
+        description="Why the output is not usable, when it is not (then nearest is null): " + _REASONS_HELP + ". Null "
+        "for a usable output, matched or not (and in payloads before puppet_version 1.2).",
+    )
 
     @model_validator(mode="after")
     def _match_agrees(self) -> PoseMatch:
@@ -411,6 +456,8 @@ class PoseMatch(BaseModel):
             raise ValueError("nearest, distance and shared_joints are all set or all null")
         if self.nearest is None and self.close:
             raise ValueError("an output with no comparable reference pose cannot be close")
+        if self.unusable_reason is not None and self.nearest is not None:
+            raise ValueError("an unusable output has no nearest reference pose")
         return self
 
 
@@ -426,6 +473,16 @@ class PoseSetComparison(_Versioned):
         "reference pose.",
     )
     reference_count: int = Field(..., ge=0, description="Usable reference poses compared against.")
+    output_unusable_reasons: UnusableReasons = Field(
+        default_factory=dict,
+        description="How many output images are unusable for each reason (matches' unusable_reason), listing only "
+        "reasons that occur; empty when every output is usable (and in payloads before puppet_version 1.2).",
+    )
+    reference_unusable_reasons: UnusableReasons = Field(
+        default_factory=dict,
+        description="How many reference images are unusable for each reason, listing only reasons that occur; empty "
+        "when every reference image is usable (and in payloads before puppet_version 1.2).",
+    )
     matches: list[PoseMatch] = Field(
         default_factory=list,
         description="One per output image, sorted by image name; nearest/distance are null for an unmatched output.",
@@ -493,6 +550,10 @@ class PoseSetComparison(_Versioned):
             raise ValueError(f"{len(self.matches)} matches for output_count {self.output_count}")
         if sum(m.nearest is not None for m in self.matches) != self.matched_count:
             raise ValueError("matched_count disagrees with the matches that have a nearest reference")
+        if self.output_unusable_reasons:
+            per_match = Counter(m.unusable_reason for m in self.matches if m.unusable_reason is not None)
+            if dict(per_match) != self.output_unusable_reasons:
+                raise ValueError("output_unusable_reasons disagrees with the matches' unusable_reason")
         if self.close_eligible > self.matched_count:
             raise ValueError(f"close_eligible {self.close_eligible} exceeds matched_count {self.matched_count}")
         if self.baseline_eligible > self.reference_count:

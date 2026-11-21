@@ -168,6 +168,7 @@ def test_unembeddable_poses_are_rejected_and_counted() -> None:
         portraits.append(_posegen_result(f"p{k:03d}.png", kp))
     build = build_library(good + portraits)
     assert build.unembeddable == 30 and build.low_score == 0
+    assert build.unembeddable_reasons == {"no_confident_hip": 30}  # embedding's reason, not a second guess
     assert not any(e.source_image.startswith("p") for e in build.library.entries)
     capped = build_library(good + portraits, max_entries=25)
     assert len(capped.library.entries) == 25 and capped.unembeddable == 30

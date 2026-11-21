@@ -103,7 +103,7 @@ def compare_pose_sets(
 
     ``matches`` lists one entry per output image, sorted by image name. An output that is unusable, or shares too few
     joints with every usable reference pose, has ``nearest``, ``distance`` and ``shared_joints`` null and is not
-    close. An output is close when some reference pose sharing at least ``params.min_close_joints`` of the 12
+    close; an unusable one also carries its ``unusable_reason`` (null for a usable but unmatched output). An output is close when some reference pose sharing at least ``params.min_close_joints`` of the 12
     non-head joints with it is closer than *threshold*; its match then names the nearest such pose, and otherwise the
     nearest comparable pose of any coverage. ``close_share`` is over the outputs that could be close
     (``close_eligible``); ``baseline_close_share`` is the same share inside the reference set, each reference pose
@@ -130,7 +130,7 @@ def compare_pose_sets(
     for i, image in enumerate(out_set.images):
         row = row_of.get(i)
         if row is None or nn.index[row] < 0:
-            matches.append(PoseMatch(image=image, close=False))
+            matches.append(PoseMatch(image=image, close=False, unusable_reason=out_set.reasons[i]))
             continue
         close = bool(nn.full_index[row] >= 0 and nn.full_distance[row] < threshold)
         if close:
@@ -163,6 +163,8 @@ def compare_pose_sets(
         output_count=len(matches),
         matched_count=matched,
         reference_count=len(ref_idx),
+        output_unusable_reasons=out_set.reason_counts(),
+        reference_unusable_reasons=ref_set.reason_counts(),
         matches=matches,
         close_eligible=int(eligible.sum()),
         close_share=close_share,

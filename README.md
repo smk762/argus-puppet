@@ -69,7 +69,10 @@ argus-puppet library sample poses.library.json -n 8 --render-dir batch --size 10
 
 Re-running `pose` skips images that already have a sidecar, so it is cheap to repeat. A set with fewer than two
 usable poses scores diversity 0; measure sets of tens of images or more, and read `usable` and `comparable_share`
-before trusting the score (see [docs/metrics.md](docs/metrics.md#suggested-gate-for-proof)). In `compare`, a close
+before trusting the score (see [docs/metrics.md](docs/metrics.md#suggested-gate-for-proof)). Each unusable image
+says why (`items[].unusable_reason`, counted in `unusable_reasons`, e.g. `{"no_confident_shoulder": 3}`): a crop
+without the shoulders or hips in frame is correctly unusable, so smoke-test with full-body or at least torso-in-frame
+photos ([docs/metrics.md](docs/metrics.md#what-makes-a-pose-unusable)). In `compare`, a close
 pose match means "the same pose", not "a copied frame": most same-stance poses have a near twin in a large training
 set. Read the per-output match as a pointer for an image-level check, and `close_share` against the training set's
 own `baseline_close_share` (`close_excess`) as the run-level signal
@@ -113,7 +116,7 @@ it apart from other packages' `<stem>.json` sidecars). It is a `PoseResult`, the
 
 ```jsonc
 {
-  "puppet_version": "1.1",
+  "puppet_version": "1.2",
   "image": "woman_yoga.jpg",
   "image_sha256": "…",
   "width": 480, "height": 720,
