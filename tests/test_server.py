@@ -100,7 +100,7 @@ def test_a_chunked_multipart_past_the_cap_is_refused_before_it_is_read_to_the_en
     """No Content-Length: the stream is counted against the cap plus the multipart overhead, not spooled whole."""
     app = create_app(dataclasses.replace(settings, max_upload_bytes=MB), estimator=fake)
     reply = asgi_request(app, "/pose", megabytes(32, FORM_HEAD, FORM_TAIL), headers=MULTIPART)
-    assert reply.status == 413, reply.body
+    assert reply.status == 413 and str(MB).encode() in reply.body, reply.body
     assert reply.consumed <= 2 * MB + len(FORM_HEAD), f"the server read {reply.consumed // MB} MB past a 1 MB cap"
     assert fake.calls == 0
     ok = asgi_request(app, "/pose", [FORM_HEAD, draw_image(), FORM_TAIL], headers=MULTIPART)

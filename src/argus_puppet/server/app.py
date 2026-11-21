@@ -211,7 +211,12 @@ async def read_image(request: Request, cap: int, *, timeout: float) -> tuple[byt
     if content_type.startswith("multipart/form-data"):
         # The whole body, declared or chunked, is read against the cap plus the multipart overhead (an over-cap
         # stream stops there), then parsed from memory; read_upload holds the file to the exact cap.
-        raw = await read_capped(request, cap + MULTIPART_OVERHEAD, timeout=timeout, what="image")
+        try:
+            raw = await read_capped(request, cap + MULTIPART_OVERHEAD, timeout=timeout, what="image")
+        except HTTPException as exc:
+            if exc.status_code == 413:  # name the image's cap, not the cap plus the overhead
+                raise HTTPException(413, str(TooLarge("image", cap))) from None
+            raise
         try:
             async with _replayed(request, raw).form() as form:
                 upload = next((v for v in form.values() if hasattr(v, "read")), None)
