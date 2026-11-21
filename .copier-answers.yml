@@ -18,5 +18,5 @@ project_name: argus-puppet
 python_min: '3.11'
 ruff_pin: 0.15.16
 test_extras: dev,server,cli,cpu
-version_build_arg: false
+version_build_arg: true
 

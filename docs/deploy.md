@@ -85,7 +85,8 @@ verified. It also gives the provider and device, free VRAM on a GPU, and read-on
 ```json
 {"puppet_version": "1.0", "version": "0.1.0", "read_only": false,
  "models": {"dwpose-l-384x288": true, "dwpose-m-256x192": true, "yolox_m": true, "yolox_nano": true},
- "provider": "CUDAExecutionProvider", "device": "cuda", "free_vram_mb": 22544}
+ "pose_model": "dwpose-l-384x288", "detector_model": "yolox_m",
+ "provider": "CUDAExecutionProvider", "device": "cuda", "gpu_coordinator": "none", "free_vram_mb": 22544}
 ```
 
 The image's `HEALTHCHECK` calls it with Python (the slim image has no curl). The first call can hash the model
@@ -109,7 +110,7 @@ All `ARGUS_PUPPET_*` settings are read in `src/argus_puppet/config.py`:
 | `ARGUS_PUPPET_GPU_MEM_LIMIT_MB` | runtime default | A cap on each ONNX Runtime CUDA session's arena, in MB (at least 256) |
 | `ARGUS_PUPPET_POSE_MODEL` | registry default | The pose model, by registry name (`argus-puppet models list`) |
 | `ARGUS_PUPPET_DETECTOR_MODEL` | registry default | The person detector, by registry name |
-| `ARGUS_PUPPET_DATA_ROOT` | unset | The only root a caller-supplied path may fall under. Unset: `POST /pose/scan` refuses |
+| `ARGUS_PUPPET_DATA_ROOT` | unset | The only root a caller-supplied path may fall under. Unset: `POST /pose/scan`, and `/stats` or `/compare` given a `path`, refuse (409) |
 | `ARGUS_PUPPET_READ_ONLY` | off | Refuse every state-changing request (see below) |
 | `ARGUS_PUPPET_CORS_ORIGINS` | none | Browser origins allowed to call the API, comma-separated |
 | `ARGUS_PUPPET_TRUSTED_HOSTS` | none | Host names (no port) a page may be served from and still write to its own server. IPs and `localhost` need none |
@@ -119,7 +120,10 @@ All `ARGUS_PUPPET_*` settings are read in `src/argus_puppet/config.py`:
 | `ARGUS_PUPPET_DET_THRESHOLD` | 0.3 | Person-detector score threshold |
 | `ARGUS_PUPPET_NMS_IOU` | 0.45 | Detector non-maximum-suppression IoU |
 | `ARGUS_PUPPET_MAX_SCAN_IMAGES` | 2000 | Images one `POST /pose/scan` processes. The rest are skipped |
-| `ARGUS_PUPPET_POSE_CONCURRENCY` | 2 | `POST /pose` calls in flight at once. Past it a call gets 503 with `Retry-After` |
+| `ARGUS_PUPPET_POSE_CONCURRENCY` | 2 | `POST /pose` calls in flight at once, and separately `POST /stats`, `/compare` and `/render` calls together (1 to 64). Past it a call gets 503 with `Retry-After` |
+| `ARGUS_PUPPET_MAX_SET_RESULTS` | 5000 | Poses in one set of `POST /stats` or `/compare` (the distance matrix grows with the square). Past it: 413 |
+| `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | Largest JSON body `POST /stats`, `/compare` and `/render` accept. Past it: 413 |
+| `ARGUS_PUPPET_AGE_URL` | unset | argus-curator's base URL, for `argus-puppet library build --age-check` only. Unset: the check cannot run and nothing is sent ([index.md](index.md#privacy-and-the-age-fail-safe)) |
 
 The image also sets `ARGUS_GPU_TENANT_MANIFEST=/app/gpu-tenant.yaml` (see [GPU sharing](#gpu-sharing-argus-iris)).
 
@@ -128,13 +132,16 @@ The image also sets `ARGUS_GPU_TENANT_MANIFEST=/app/gpu-tenant.yaml` (see [GPU s
 `ARGUS_PUPPET_READ_ONLY=1` adds a guard that refuses every state-changing request with 403. In the current release
 that covers every `POST`, including `POST /pose` (which writes nothing), so only `GET /health` still answers.
 Independently of read-only mode, every unsafe request passes an origin guard: a page from another site is refused
-unless its origin is in `ARGUS_PUPPET_CORS_ORIGINS`, or its host is in `ARGUS_PUPPET_TRUSTED_HOSTS`.
+unless its origin is in `ARGUS_PUPPET_CORS_ORIGINS`, or its host is in `ARGUS_PUPPET_TRUSTED_HOSTS`. The full
+security model is in [server.md](server.md#security-model).
 
 ## The data root
 
 `POST /pose/scan {path, recursive, overwrite}` poses a folder of images and writes a `<stem>.pose.json` sidecar
 beside each one. `path` is resolved under `ARGUS_PUPPET_DATA_ROOT` and refused if it falls outside. With no data
-root the route refuses everything. `POST /pose`, which takes the image in the request body, needs no data root.
+root the route refuses everything. `POST /stats` and `POST /compare` can also name a set by a folder of sidecars
+under the same root. `POST /pose`, which takes the image in the request body, needs no data root, nor do sets sent
+inline.
 
 To enable scans, bind the dataset into the container and point the data root at it:
 
