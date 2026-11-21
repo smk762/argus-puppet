@@ -25,9 +25,9 @@ fences its path (409 without a data root, 400 outside it, 404 missing). A set ho
 counted against its cap as it streams, declared length or not, and cut off at ``ARGUS_PUPPET_BODY_TIMEOUT_S`` (408),
 so a slow client cannot hold an admission slot.
 
-There is no auth: reaching the port is host access. Every unsafe method passes the origin
-:class:`~argus_cortex.server.WriteGuard` (another site's page is refused), then, in read-only mode, a second guard
-refusing every write; CORS is outermost so a refused cross-origin write is still readable. Inference runs off the
+There is no auth: reaching the port is host access. A request meets CORS first (outermost, so a refused
+cross-origin write is still readable), then, in read-only mode, a :class:`~argus_cortex.server.WriteGuard` refusing
+every unsafe method, then the origin guard (another site's page is refused). Inference runs off the
 event loop (``asyncio.to_thread``).
 
 Extending: add routes to the app :func:`create_app` returns, reaching the shared pieces through
@@ -127,8 +127,8 @@ class AppState:
 
 
 def install_guards(app: FastAPI, settings: Settings) -> Callable[..., str | None]:
-    """The write guards and CORS: origin guard, then read-only guard, then CORS outermost. Returns the origin
-    predicate."""
+    """The write guards and CORS. A request meets CORS (outermost), then the read-only guard, then the origin guard:
+    Starlette puts the last middleware added outermost. Returns the origin predicate."""
     wildcard = "*" in settings.cors_origins
     named = [o for o in settings.cors_origins if o != "*"]
     origin_refusal = cross_site_refuse(named, settings.trusted_hosts)

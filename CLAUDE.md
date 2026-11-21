@@ -101,9 +101,13 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   `GET /health`, `POST /pose` (writes nothing; inference via `asyncio.to_thread`, bounded concurrency -> 503), `POST
   /pose/scan` (the one write; `path` fenced under `Settings.data_root` with `safe_join`), `POST /stats`, `/compare`
   (sets inline or as sidecar folders fenced like `/pose/scan`; `max_set_results` per set) and `/render` (PNG;
-  `max_pixels`, `max_people`). JSON bodies go through `read_json` (`max_json_bytes`, 422 without echoing input),
-  compute through `asyncio.to_thread` under `AppState.compute_admit`. `install_guards` wires origin guard, then
-  read-only guard, then CORS outermost. Shared state for new routes: `app.state.puppet` (`AppState`).
+  `max_pixels`, `max_people`). Every body is read through `read_capped` (its cap counted as it streams, declared
+  length or not; `Settings.body_timeout_s` deadline -> 408); JSON bodies through `read_json` on top (`max_json_bytes`,
+  16 KiB for `/pose/scan`, 4 MiB for `/render`; set bodies pre-counted on the raw bytes by `set_precheck`; 422 without
+  echoing input), compute through `asyncio.to_thread` under `AppState.compute_admit`. A new route reads its body
+  through these, never `request.body()`/`.form()` or a FastAPI body parameter. `install_guards` wires them so a
+  request meets CORS (outermost), then the read-only guard, then the origin guard. Shared state for new routes:
+  `app.state.puppet` (`AppState`).
 - `gpu-tenant.yaml` (repo root) — the argus-iris tenant manifest (kind `pose`); `tests/test_gpu_tenant.py` validates it.
 
 ## Commands

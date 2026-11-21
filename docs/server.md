@@ -298,7 +298,7 @@ There is **no authentication**. Anyone who can reach the port can use every rout
 the host's models, its GPU time and, through the data root, its files. Keep the service on loopback (the default for
 both `serve` and `compose.yaml`) or behind a proxy you control.
 
-Three guards stand in front of the routes:
+Three guards stand in front of the routes (a request meets the read-only guard before the origin guard):
 
 1. **Origin guard.** Every state-changing request (every `POST` here) with a browser `Origin` header is refused with
    403 unless the origin is listed in `ARGUS_PUPPET_CORS_ORIGINS`, or the page is served from the same host and port

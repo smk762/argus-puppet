@@ -7,7 +7,8 @@
 #
 # One kind: the person detector and the pose model run in puppet's own process, in one lease. model_mb is the two
 # default ONNX files (YOLOX-m 101 MB + DWPose-l 134 MB) as loaded; vram_mb adds ONNX Runtime's CUDA arena for a
-# batch of crops. Folder scans and set metrics take batch priority. Not preemptible: a lease covers one batch.
+# batch of crops. Folder scans take batch priority; POST /pose takes interactive. Set metrics (/stats, /compare)
+# run on the CPU and take no lease. Not preemptible: a lease covers one batch.
 #
 # No residents yet: puppet has no /admin/unload route, so the broker cannot free its models.
 tenant_version: "1.0"

@@ -132,6 +132,22 @@ def test_read_only_mode_refuses_every_unsafe_route(tmp_path) -> None:
     assert not (root / "set" / "a.pose.json").exists()
 
 
+def test_the_guards_run_in_the_documented_order(tmp_path) -> None:
+    """CORS outermost (a refusal is readable cross-origin), then read-only, then the origin guard."""
+    app, _ = _app(tmp_path, read_only=True, cors_origins=("https://evil.example",))
+    with TestClient(app) as client:
+        reply = client.post("/stats", headers={**EVIL, "origin": "https://other.example"}, json={"path": "set"})
+        assert reply.status_code == 403 and "read-only" in reply.json()["detail"]  # read-only answered first
+    app, _ = _app(tmp_path, cors_origins=("https://evil.example",))
+    with TestClient(app) as client:
+        reply = client.post("/stats", headers={**EVIL, "origin": "https://other.example"}, json={"path": "set"})
+        assert reply.status_code == 403 and "read-only" not in reply.json()["detail"]
+    app, _ = _app(tmp_path, read_only=True, cors_origins=("https://evil.example",))
+    with TestClient(app) as client:
+        reply = client.post("/stats", headers=EVIL, json={"path": "set"})
+        assert reply.status_code == 403 and reply.headers["access-control-allow-origin"] == "https://evil.example"
+
+
 def test_a_scan_path_escaping_the_data_root_is_refused(tmp_path) -> None:
     app, root = _app(tmp_path)
     outside = tmp_path / "outside"
