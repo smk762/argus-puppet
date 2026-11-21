@@ -32,6 +32,7 @@ from argus_puppet.embedding import (
     DEFAULT_MIN_SHARED_JOINTS,
     DEFAULT_MIN_SHARED_LIMB_JOINTS,
     DEFAULT_MIN_USABLE_JOINTS,
+    NUM_CORE_JOINTS,
 )
 from argus_puppet.skeleton import LAYOUT, NUM_KEYPOINTS, part_mean_scores
 
@@ -258,6 +259,10 @@ DEFAULT_CLUSTER_THRESHOLD = 0.25
 # keeps the slope at d = 0 flat, so estimator jitter on one repeated pose scores near zero. Calibrated on the
 # synthetic generators: see docs/metrics.md.
 DEFAULT_DIVERSITY_SCALE = 0.3
+# A close pose match (or a library duplicate) needs the comparison to cover the whole limb skeleton: two poses that
+# share only their upper bodies can match at 0.05 whatever their legs do (a waist-up standing output against a
+# full-body seated frame).
+DEFAULT_MIN_CLOSE_JOINTS = NUM_CORE_JOINTS
 
 
 class MetricParams(BaseModel):
@@ -290,6 +295,14 @@ class MetricParams(BaseModel):
         DEFAULT_DIVERSITY_SCALE,
         gt=0.0,
         description="Distance scale of the diversity score: a pair this far apart adds 1 - 1/e (0.63) to the mean.",
+    )
+    min_close_joints: int = Field(
+        DEFAULT_MIN_CLOSE_JOINTS,
+        ge=0,
+        le=NUM_CORE_JOINTS,
+        description="Of the 12 non-head body joints (shoulders, elbows, wrists, hips, knees, ankles), how many two "
+        "poses must share before their distance can call them a close pose match (compare) or duplicates (library "
+        "dedupe). 12 means the whole limb skeleton: a waist-up pose is never a close match to a full-body frame.",
     )
 
 
@@ -339,6 +352,16 @@ class PoseSetStats(_Versioned):
         return self
 
 
+class DistanceQuantiles(BaseModel):
+    """Quantiles of a set of nearest-neighbour distances (torso units)."""
+
+    n: int = Field(..., ge=1, description="How many distances the quantiles are over.")
+    p01: float = Field(..., ge=0.0, description="1st percentile.")
+    p10: float = Field(..., ge=0.0, description="10th percentile.")
+    p50: float = Field(..., ge=0.0, description="Median.")
+    p90: float = Field(..., ge=0.0, description="90th percentile.")
+
+
 class PoseMatch(BaseModel):
     """An output image's nearest reference pose."""
 
@@ -346,45 +369,95 @@ class PoseMatch(BaseModel):
     nearest: str | None = Field(
         None,
         description="The reference image with the closest pose; null when the output is unusable or shares too few "
-        "joints with every reference pose (no comparable reference pose).",
+        "joints with every reference pose (no comparable reference pose). When the output is close, the nearest "
+        "reference that shares the whole limb skeleton with it (which may differ from the nearest partial match).",
     )
     distance: float | None = Field(
         None, ge=0.0, description="Pose distance between the two; null exactly when nearest is null."
     )
-    memorised: bool = Field(
-        ..., description="Whether distance is below the comparison's threshold; always false without a match."
+    shared_joints: int | None = Field(
+        None,
+        ge=0,
+        le=NUM_CORE_JOINTS,
+        description="Non-head body joints (of 12: shoulders, elbows, wrists, hips, knees, ankles) confident in both "
+        "poses in the orientation compared; null exactly when nearest is null.",
+    )
+    close: bool = Field(
+        ...,
+        description="A close pose match: distance below the comparison's threshold with at least "
+        "params.min_close_joints shared joints (the whole limb skeleton by default). It means 'the same pose', not "
+        "'a copied frame': most same-stance poses match at the default threshold. Use it as a pointer to the training "
+        "frame an image-level check should compare against; the run-level signal is close_excess.",
     )
 
     @model_validator(mode="after")
     def _match_agrees(self) -> PoseMatch:
-        if (self.nearest is None) != (self.distance is None):
-            raise ValueError("nearest and distance are both set or both null")
-        if self.nearest is None and self.memorised:
-            raise ValueError("an output with no comparable reference pose cannot be memorised")
+        if not ((self.nearest is None) == (self.distance is None) == (self.shared_joints is None)):
+            raise ValueError("nearest, distance and shared_joints are all set or all null")
+        if self.nearest is None and self.close:
+            raise ValueError("an output with no comparable reference pose cannot be close")
         return self
 
 
 class PoseSetComparison(_Versioned):
-    """An output set's poses against a reference (training) set: copied poses and coverage drift."""
+    """An output set's poses against a reference (training) set: close pose matches against the reference set's own
+    baseline, and coverage drift."""
 
     output_count: int = Field(..., ge=0, description="Output images compared, usable or not (one match entry each).")
     matched_count: int = Field(
         ...,
         ge=0,
         description="Outputs with a nearest reference pose: usable, and comparable with at least one usable "
-        "reference pose. memorised_share is over these.",
+        "reference pose.",
     )
     reference_count: int = Field(..., ge=0, description="Usable reference poses compared against.")
     matches: list[PoseMatch] = Field(
         default_factory=list,
         description="One per output image, sorted by image name; nearest/distance are null for an unmatched output.",
     )
-    memorised_share: Unit = Field(
+    close_eligible: int = Field(
         ...,
-        description="Memorised outputs / matched_count (0 when nothing matched). Unusable and unmatched outputs are "
-        "left out of the denominator: they are no evidence either way.",
+        ge=0,
+        description="Outputs that could be close: they share at least params.min_close_joints joints with at least "
+        "one reference pose (in practice: the output and some reference frame both show the whole limb skeleton). "
+        "close_share is over these.",
     )
-    threshold: float = Field(..., ge=0.0, description="Pose distance below which an output counts as memorised.")
+    close_share: Unit = Field(
+        ...,
+        description="Close outputs / close_eligible (0 when none is eligible). On its own it is not evidence of "
+        "copying: compare it with baseline_close_share.",
+    )
+    baseline_eligible: int = Field(
+        ...,
+        ge=0,
+        description="Reference poses that could be close to another reference pose (leave-one-out, same rules).",
+    )
+    baseline_close_share: Unit | None = Field(
+        None,
+        description="The same statistic inside the reference set, leave-one-out: the share of eligible reference "
+        "poses whose nearest *other* reference pose (sharing params.min_close_joints joints) is closer than the "
+        "threshold. How often training frames are close to each other, i.e. what close_share looks like without "
+        "any copying. Null with fewer than 2 usable reference poses or none eligible.",
+    )
+    close_excess: Unit | None = Field(
+        None,
+        description="max(0, close_share - baseline_close_share): how much more often outputs sit within the "
+        "threshold of a training frame than training frames sit to each other. The run-level copying signal; null "
+        "when baseline_close_share is null.",
+    )
+    output_nn_distance: DistanceQuantiles | None = Field(
+        None,
+        description="Quantiles, over the eligible outputs, of the distance to the nearest reference pose sharing "
+        "params.min_close_joints joints; null when no output is eligible.",
+    )
+    reference_nn_distance: DistanceQuantiles | None = Field(
+        None,
+        description="Quantiles, over the eligible reference poses, of the distance to the nearest other reference "
+        "pose sharing params.min_close_joints joints (leave-one-out); null when baseline_close_share is null. "
+        "Outputs whose quantiles sit well below these are closer to the training frames than the frames are to "
+        "each other.",
+    )
+    threshold: float = Field(..., ge=0.0, description="Pose distance below which a match can be close.")
     coverage_divergence: Unit = Field(
         ...,
         description="Jensen-Shannon divergence (base 2) between the output and reference coverage histograms, "
@@ -405,6 +478,12 @@ class PoseSetComparison(_Versioned):
             raise ValueError(f"{len(self.matches)} matches for output_count {self.output_count}")
         if sum(m.nearest is not None for m in self.matches) != self.matched_count:
             raise ValueError("matched_count disagrees with the matches that have a nearest reference")
+        if self.close_eligible > self.matched_count:
+            raise ValueError(f"close_eligible {self.close_eligible} exceeds matched_count {self.matched_count}")
+        if self.baseline_eligible > self.reference_count:
+            raise ValueError(f"baseline_eligible {self.baseline_eligible} exceeds reference_count")
+        if (self.baseline_close_share is None) != (self.close_excess is None):
+            raise ValueError("close_excess is set exactly when baseline_close_share is")
         return self
 
 
@@ -592,7 +671,7 @@ class CompareRequest(BaseModel):
     outputs: PoseSetSource
     reference: PoseSetSource
     threshold: float | None = Field(
-        None, ge=0.0, description="Memorisation distance (default: compare.DEFAULT_MEMORISATION_THRESHOLD, 0.08)."
+        None, ge=0.0, description="Close pose match distance (default: compare.DEFAULT_CLOSE_THRESHOLD, 0.08)."
     )
     params: MetricParams = Field(default_factory=MetricParams, description="Metric thresholds (default: suite's).")
 

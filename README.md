@@ -2,7 +2,8 @@
 
 Body pose for the Argus suite. Puppet finds every person in an image, places 133 whole-body keypoints on each
 (body, feet, hands and face), and turns those keypoints into numbers other packages can act on: how varied a set of
-poses is, which poses dominate it, whether an output copies a training frame's pose, and skeleton control images
+poses is, which poses dominate it, whether outputs sit closer to training frames' poses than those frames sit to
+each other, and skeleton control images
 that drive a pose ControlNet. It is a library, a CLI and an HTTP service on port 8110. It has no Studio stage of its
 own: argus-proof, argus-curator, argus-darkroom and the others call it, as they call argus-retina's detectors.
 
@@ -15,7 +16,7 @@ write guards, GPU leases) comes from argus-cortex.
 |---|---|---|---|
 | **Extract** | A `PoseResult` per image: every person's box, 133 keypoints with scores, the primary subject, and the SHA-256 of the models that ran. Saved as a `<stem>.pose.json` sidecar beside the image | `pose` | `POST /pose`, `POST /pose/scan` |
 | **Measure** | `PoseSetStats`: a diversity score, clusters of similar poses, and coverage counts by stance, arms and facing | `stats` | `POST /stats` |
-| **Compare** | `PoseSetComparison`: each output's nearest reference (training) pose, the share that sit closer than a memorisation threshold, and how far the pose mix drifted | `compare` | `POST /compare` |
+| **Compare** | `PoseSetComparison`: each output's nearest reference (training) pose, the share of close pose matches against the training set's own baseline, and how far the pose mix drifted | `compare` | `POST /compare` |
 | **Condition** | OpenPose-convention skeleton PNGs for pose ControlNets, and a pose library you can sample diverse poses from | `render`, `library build`, `library sample` | `POST /render` |
 
 ## Install
@@ -67,7 +68,11 @@ argus-puppet library sample poses.library.json -n 8 --render-dir batch --size 10
 
 Re-running `pose` skips images that already have a sidecar, so it is cheap to repeat. A set with fewer than two
 usable poses scores diversity 0; measure sets of tens of images or more, and read `usable` and `comparable_share`
-before trusting the score (see [docs/metrics.md](docs/metrics.md#suggested-gate-for-proof)). For a faster, lighter model pair on the
+before trusting the score (see [docs/metrics.md](docs/metrics.md#suggested-gate-for-proof)). In `compare`, a close
+pose match means "the same pose", not "a copied frame": most same-stance poses have a near twin in a large training
+set. Read the per-output match as a pointer for an image-level check, and `close_share` against the training set's
+own `baseline_close_share` (`close_excess`) as the run-level signal
+([docs/metrics.md](docs/metrics.md#what-a-close-pose-match-means)). For a faster, lighter model pair on the
 CPU, add `--pose-model dwpose-m-256x192 --detector yolox_nano` (see
 [docs/models.md](docs/models.md#choosing-models)).
 

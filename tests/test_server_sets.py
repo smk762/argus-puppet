@@ -135,12 +135,12 @@ def test_compare_inline_and_by_path(settings, root) -> None:
     reply = c.post("/compare", json={"outputs": {"results": body(rs)}, "reference": {"path": "set"}})
     assert reply.status_code == 200, reply.text
     cmp = PoseSetComparison.model_validate(reply.json())
-    assert cmp.output_count == 4 and cmp.memorised_share == 1.0 and cmp.reference_count == 5
+    assert cmp.output_count == 4 and cmp.close_share == 1.0 and cmp.reference_count == 5
     assert all(m.distance == 0.0 and m.nearest == m.image for m in cmp.matches)
     loose = c.post(
         "/compare", json={"outputs": {"results": body(rs[:1])}, "reference": {"results": body(rs[1:])}, "threshold": 9}
     ).json()
-    assert loose["threshold"] == 9 and loose["memorised_share"] == 1.0
+    assert loose["threshold"] == 9 and loose["close_share"] == 1.0
     assert loose == json.loads(compare_pose_sets(rs[:1], rs[1:], threshold=9).model_dump_json())
 
 

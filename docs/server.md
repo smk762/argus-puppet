@@ -182,13 +182,13 @@ the same one.
 An output set's poses against a reference (training) set: for each output, the nearest reference pose.
 
 ```json
-{"outputs": {"path": "lora-outputs/run-12"}, "reference": {"path": "training/concept-a"}, "threshold": 0.08}
+{"outputs": {"path": "lora-outputs/run-12"}, "reference": {"path": "training/concept-a"}, "threshold": 0.04}
 ```
 
 | Field | Default | Meaning |
 |---|---|---|
 | `outputs`, `reference` | required | Two pose sets, each `results` or `path` |
-| `threshold` | 0.08 | Pose distance (torso units) below which an output counts as memorised |
+| `threshold` | 0.04 | Pose distance (torso units) below which a match over the whole limb skeleton is a close pose match |
 | `params` | suite defaults | `MetricParams`, as for `/stats` |
 
 ```bash
@@ -197,13 +197,15 @@ curl -s -X POST -H 'content-type: application/json' \
   http://<PUPPET_HOST>:8110/compare
 ```
 
-The answer is a `PoseSetComparison`: one `matches` entry per output (`nearest`, `distance`, `memorised`),
-`output_count`, `matched_count`, `reference_count`, `memorised_share` (over matched outputs only), the
+The answer is a `PoseSetComparison`: one `matches` entry per output (`nearest`, `distance`, `shared_joints`,
+`close`), `output_count`, `matched_count`, `reference_count`, `close_eligible` and `close_share`, the reference set's
+own leave-one-out `baseline_close_share` and `close_excess`, nearest-distance quantiles for both sides, the
 `coverage_divergence` between the two sets' label mixes, both coverages, the threshold and params used.
 
-A pose match is evidence, not proof, of memorisation: different people strike the same pose, and a pose-conditioned
-generator reproduces reference poses by design. Read it beside identity and image-similarity checks
-([metrics.md](metrics.md#the-memorisation-threshold)).
+A close pose match means "the same pose", not "a copied frame": different people strike the same pose, and a
+pose-conditioned generator reproduces reference poses by design. The per-output flag points an image-level check at
+a training frame; the run-level signal is `close_excess`
+([metrics.md](metrics.md#what-a-close-pose-match-means)).
 
 Each set counts against the set cap separately, so one request can carry two sets of 5000.
 

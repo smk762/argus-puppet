@@ -311,7 +311,7 @@ def _print_stats(folder: Path, s: PoseSetStats, out: Path | None) -> None:
 def compare(
     outputs: Path = Argument(..., help="Folder of output images' sidecars (e.g. a LoRA's samples)"),
     reference: Path = Argument(..., help="Folder of reference (training) images' sidecars"),
-    threshold: float | None = Option(None, "--threshold", help="Memorisation distance, torso units [0.08]"),
+    threshold: float | None = Option(None, "--threshold", help="Close pose match distance, torso units [0.08]"),
     recursive: bool = Option(True, "--recursive/--no-recursive", help="Include subfolders"),
     run_extract: bool = Option(False, "--extract", help="Pose images that have no sidecar yet, first"),
     device: str | None = Option(None, "--device", help=DEVICE_HELP),
@@ -322,8 +322,9 @@ def compare(
     out: Path | None = Option(None, "--out", "-o", help="Write the PoseSetComparison JSON here"),
     as_json: bool = Option(False, "--json", help="Print the PoseSetComparison JSON instead of the summary"),
 ) -> None:
-    """Each output's nearest reference pose (memorisation evidence) and how far the pose mix drifted."""
-    from argus_puppet.compare import DEFAULT_MEMORISATION_THRESHOLD, compare_pose_sets
+    """Each output's nearest reference pose, close pose matches against the reference set's own baseline, and how
+    far the pose mix drifted."""
+    from argus_puppet.compare import DEFAULT_CLOSE_THRESHOLD, compare_pose_sets
 
     if threshold is not None and threshold < 0:
         raise fail("--threshold must be >= 0")
@@ -331,7 +332,7 @@ def compare(
     out_set = _load_set(outputs, recursive=recursive, run_extract=run_extract, device=device)
     ref_set = _load_set(reference, recursive=recursive, run_extract=run_extract, device=device)
     result = compare_pose_sets(
-        out_set, ref_set, threshold=DEFAULT_MEMORISATION_THRESHOLD if threshold is None else threshold, params=params
+        out_set, ref_set, threshold=DEFAULT_CLOSE_THRESHOLD if threshold is None else threshold, params=params
     )
     text = result.model_dump_json(indent=2)
     if out is not None:
@@ -352,17 +353,29 @@ def _print_comparison(c: PoseSetComparison, top: int, out: Path | None) -> None:
     summary.add_row("outputs", str(c.output_count))
     summary.add_row("matched outputs", str(c.matched_count))
     summary.add_row("usable reference poses", str(c.reference_count))
-    summary.add_row("memorised share", f"{c.memorised_share:.0%} (distance < {c.threshold:g})")
+    summary.add_row("close-match eligible outputs", str(c.close_eligible))
+    summary.add_row("close share", f"{c.close_share:.0%} (distance < {c.threshold:g}, whole limb skeleton shared)")
+    if c.baseline_close_share is None:
+        summary.add_row("reference baseline", "n/a (fewer than 2 comparable reference poses)")
+    else:
+        summary.add_row("reference baseline", f"{c.baseline_close_share:.0%} (reference vs reference, leave-one-out)")
+        summary.add_row("close excess", f"{c.close_excess:.0%} (the run-level signal; per-output matches are pointers)")
+    for label, q in (
+        ("output nearest distance", c.output_nn_distance),
+        ("reference nearest distance", c.reference_nn_distance),
+    ):
+        if q is not None:
+            summary.add_row(label, f"p01 {q.p01:.3f}  p10 {q.p10:.3f}  p50 {q.p50:.3f}  p90 {q.p90:.3f}  (n={q.n})")
     summary.add_row("coverage divergence", f"{c.coverage_divergence:.3f}")
     console.print(summary)
     matched = sorted((m for m in c.matches if m.distance is not None), key=lambda m: (m.distance, m.image))
     if matched:
         table = Table(title=f"closest matches (top {min(top, len(matched))})")
-        for col in ("output", "nearest reference", "distance", "memorised"):
+        for col in ("output", "nearest reference", "distance", "shared joints", "close pose match"):
             table.add_column(col)
         for m in matched[:top]:
-            flag = "[red]yes[/red]" if m.memorised else "no"
-            table.add_row(escape(m.image), escape(m.nearest or ""), f"{m.distance:.3f}", flag)
+            flag = "[yellow]yes[/yellow]" if m.close else "no"
+            table.add_row(escape(m.image), escape(m.nearest or ""), f"{m.distance:.3f}", f"{m.shared_joints}/12", flag)
         console.print(table)
     if out is not None:
         console.print(f"wrote {escape(str(out))}")

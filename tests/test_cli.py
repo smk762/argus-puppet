@@ -201,16 +201,17 @@ def test_stats_without_sidecars_fails_unless_extracting(monkeypatch, tmp_path) -
     assert fake.calls == 1 and (tmp_path / "a.pose.json").exists()
 
 
-def test_compare_a_folder_against_itself_is_all_memorised(tmp_path) -> None:
+def test_compare_a_folder_against_itself_is_all_close(tmp_path) -> None:
     from argus_puppet.models import PoseSetComparison
 
     folder = _sidecar_folder(tmp_path / "set", SET)
     result = runner.invoke(app, ["compare", str(folder), str(folder), "--json"])
     assert result.exit_code == 0, result.output
     cmp = PoseSetComparison.model_validate_json(result.stdout)
-    assert cmp.memorised_share == 1.0 and all(m.distance == 0.0 for m in cmp.matches)
+    assert cmp.close_share == 1.0 and all(m.distance == 0.0 for m in cmp.matches)
     table = runner.invoke(app, ["compare", str(folder), str(folder), "--threshold", "0.01"])
-    assert table.exit_code == 0 and "closest matches" in table.output and "memorised share" in table.output
+    assert table.exit_code == 0 and "closest matches" in table.output and "close share" in table.output
+    assert "reference baseline" in table.output and "close excess" in table.output
     assert runner.invoke(app, ["compare", str(folder), str(folder), "--threshold", "-1"]).exit_code == 1
 
 

@@ -5,7 +5,7 @@ Three library calls, all deterministic and independent of input order:
 | call | module | returns |
 |---|---|---|
 | `pose_set_stats(results, params=None)` | `argus_puppet.metrics` | `PoseSetStats`: diversity, clusters, coverage, a 2D scatter |
-| `compare_pose_sets(outputs, reference, threshold=0.08, params=None)` | `argus_puppet.compare` | `PoseSetComparison`: nearest training frame per output, memorised share, coverage drift |
+| `compare_pose_sets(outputs, reference, threshold=0.04, params=None)` | `argus_puppet.compare` | `PoseSetComparison`: nearest training frame per output, close-match share against the training set's own baseline, coverage drift |
 | `pose_labels(keypoints, min_joint_score=0.3)` | `argus_puppet.labels` | `PoseLabels`: stance, arms, facing |
 
 `load_sidecars(folder)` (`argus_puppet.sidecars`) reads a folder's `*.pose.json` sidecars, so
@@ -23,9 +23,10 @@ Every distance is the mirror-invariant pose distance of [pose-vector.md](pose-ve
 | `min_shared_joints` | 6 | body joints confident in both poses for their distance to be defined |
 | `min_shared_limb_joints` | 2 | of those, how many must be limb joints (elbows, wrists, knees, ankles) |
 | `diversity_scale` | 0.3 | the distance scale `s` of the diversity score below |
-| memorisation `threshold` | 0.08 | `compare_pose_sets`: an output closer than this to a reference frame is flagged |
+| `min_close_joints` | 12 | of the 12 non-head joints, how many two poses must share before they can be a close pose match (compare) or duplicates (library dedupe); 12 is the whole limb skeleton |
+| close `threshold` | 0.04 | `compare_pose_sets`: a match closer than this over the whole limb skeleton is a close pose match |
 
-All but the memorisation threshold travel in every result as `MetricParams`, whose fields default to these values
+All but the close threshold travel in every result as `MetricParams`, whose fields default to these values
 (`MetricParams()`, also `metrics.DEFAULT_PARAMS`); a request may give any subset. The threshold is recorded on the
 comparison itself.
 
@@ -261,36 +262,76 @@ toward the centre.
 ## Set-vs-set comparison
 
 `compare_pose_sets(outputs, reference)` embeds both sets with the same parameters and, for every output, finds the
-nearest usable reference pose under the mirror-invariant distance.
+nearest usable reference pose under the mirror-invariant distance. It then asks the same question inside the
+reference set, so the answer can be read against what "no copying" looks like for that training set.
 
 | field | definition |
 |---|---|
-| `matches` | one per output image, sorted by image name: `nearest`, `distance`, `memorised = distance < threshold`. An output that is unusable, or shares too few joints with every usable reference pose, has `nearest` and `distance` null and `memorised` false. Ties for nearest go to the alphabetically first reference image |
+| `matches` | one per output image, sorted by image name: `nearest`, `distance`, `shared_joints`, `close`. An output that is unusable, or shares too few joints with every usable reference pose, has `nearest`, `distance` and `shared_joints` null and `close` false. Ties for nearest go to the alphabetically first reference image |
+| `matches[].shared_joints` | of the 12 non-head joints (shoulders, elbows, wrists, hips, knees, ankles), how many are confident in both poses, in the orientation compared |
+| `matches[].close` | some reference pose sharing at least `min_close_joints` (12) of those joints is closer than `threshold`. The match then names the nearest such pose; otherwise it names the nearest comparable pose of any coverage, which is reported but never close. A waist-up output is never close to a full-body frame, however well the upper bodies agree |
 | `output_count` | every output image, usable or not (one `matches` entry each) |
 | `matched_count` | outputs with a nearest reference pose |
 | `reference_count` | usable reference poses |
-| `memorised_share` | memorised outputs / `matched_count`; 0 when nothing matched. Unusable and unmatched outputs are left out of the denominator: they are no evidence either way, so check `matched_count` before reading the share |
+| `close_eligible` | outputs that share all 12 joints with at least one reference pose, so could be close |
+| `close_share` | close outputs / `close_eligible`; 0 when none is eligible |
+| `baseline_eligible`, `baseline_close_share` | the same statistic inside the reference set, leave-one-out: each reference pose against its nearest *other* reference pose, same rules. Null with fewer than two usable reference poses or none eligible |
+| `close_excess` | `max(0, close_share - baseline_close_share)`; null when the baseline is |
+| `output_nn_distance`, `reference_nn_distance` | quantiles (`n`, `p01`, `p10`, `p50`, `p90`) of the distance from each eligible output to its nearest whole-skeleton reference pose, and from each eligible reference pose to its nearest other one. Outputs whose quantiles sit well below the reference's are closer to the training frames than the frames are to each other |
 | `output_coverage`, `reference_coverage` | label histograms of the usable poses of each set |
 | `coverage_divergence` | Jensen-Shannon divergence (base 2) between the two coverages, averaged over stance, arms and facing; 0 = the same mix of poses, 1 = disjoint |
 
 `unknown` counts as a label in the divergence, so a rise in unreadable bodies among the outputs registers as drift.
 If one set has no usable poses and the other does, each histogram's divergence is 1; if neither does, 0.
 
-### The memorisation threshold
+### What a close pose match means
 
-`threshold` defaults to **0.08**: a near-duplicate pose, not merely the same stance. Re-estimating one pose with
-per-joint noise of 0.02 torso units (a few pixels on a typical subject) gives distances with a median of about 0.04
-and a 99th percentile of about 0.09 on the synthetic figures. The nearest two *different* presets (standing and
-hands on hips) are 0.12 apart, and distinct stances 0.3 to 1.5. So 0.08 flags a re-estimated copy of a frame in most
-cases while staying below every distinct pose.
+**A close pose match means "the same pose", not "a copied frame".** A 2D pose cannot tell a copy from another person
+striking the same pose, and the more training frames there are, the likelier any common pose has a near twin among
+them. So:
 
-Two caveats proof must carry into its report:
+- a per-output `close` flag is a **pointer**: it names the training frame an image-level check (argus-proof's leak
+  and identity checks) should compare the output against. On its own it is no evidence of copying;
+- the **run-level signal** is `close_share` well above `baseline_close_share`: outputs sitting closer to training
+  frames than the training frames sit to each other. `close_excess` is that difference, and the two
+  `*_nn_distance` quantiles show it as a distribution.
 
-- **A pose match is evidence, not proof, of memorisation.** Different people strike the same pose; a pose within
-  roughly 10 degrees per limb of a training frame scores like a copy (about 0.05), because a 2D pose cannot tell the
-  two apart. A pose-conditioned generator, or one driven from a pose library, reproduces reference poses by design.
-- It is strongest **beside** the identity-leak and image-similarity checks: a pose match to a frame whose face also
-  matches that frame's person is a memorised frame. A pose match alone says the composition was copied.
+### The close threshold
+
+`threshold` defaults to **0.04** torso units. Re-estimating one pose with per-joint noise of 0.02 torso units (a
+few pixels on a typical subject) gives distances with a median of 0.031 and 84 % under 0.04 on the synthetic
+figures; at 0.01 noise every one is under 0.04 (99th percentile 0.030). Independent draws of one stance with 8 degrees
+of limb jitter sit 0.05 to 0.06 from their nearest neighbour among 10 to 200 frames, so only 0 to 6 % of them come
+under 0.04, and the baseline absorbs those.
+
+The threshold was 0.08 before the baseline existed. At 0.08 independent draws of one common pose were flagged at
+58 % against one reference frame and 100 % against 50, a broad mix against a broad mix at 87 %, and the baseline
+saturated along with the outputs: even outputs that were all copies showed an excess of 0.02 in a same-stance set.
+Measured on the synthetic figures (default parameters; copies are reference frames with 0.02 torso units of joint
+noise at another scale and position):
+
+| case | outputs vs reference | close_share | baseline | close_excess | output p50 | reference p50 |
+|---|---|---|---|---|---|---|
+| same stance (standing), independent draws, 8 deg / 0.03 | 200 vs 10 | 0.00 | 0.00 | 0.00 | 0.060 | 0.060 |
+| same stance (standing), independent draws, 8 deg / 0.03 | 200 vs 200 | 0.03 | 0.03 | 0.00 | 0.050 | 0.049 |
+| same stance (hands on hips), independent draws, 8 deg / 0.03 | 200 vs 200 | 0.06 | 0.00 | 0.06 | 0.051 | 0.050 |
+| same stance (standing), independent draws, 3 deg / 0.02 | 200 vs 50 | 0.99 | 0.96 | 0.03 | | |
+| broad mix vs broad mix, independent | 300 vs 200 | 0.00 | 0.00 | 0.00 | 0.067 | 0.066 |
+| broad mix, 30 % of outputs copies | 300 vs 200 | 0.26 | 0.00 | 0.26 | 0.061 | 0.067 |
+| broad mix, every output a copy | 300 vs 200 | 0.84 | 0.00 | 0.84 | 0.030 | 0.067 |
+| same stance (standing), 30 % copies | 200 vs 50 | 0.24 | 0.00 | 0.24 | 0.050 | 0.054 |
+| same stance (standing), every output a copy | 200 vs 50 | 0.84 | 0.00 | 0.84 | 0.031 | 0.055 |
+
+The 3-degree row is the case the baseline exists for: jitter that small makes every independent draw look like a
+copy (close share 0.99), and so does the reference set against itself (0.96), so the excess stays near zero. Without
+copying the excess stayed at 0.06 or less in every run; 30 % copies gave 0.24 to 0.26. A copy only shows when the
+output is re-estimated within the threshold: a copied frame regenerated with larger changes reads as the same pose
+and is caught, if at all, by the image-level checks.
+
+**Suggested use in proof** (not a reject on its own): with `close_eligible >= 20` and `baseline_eligible >= 20`, flag
+the run for review (`pose_copying`) when `close_excess >= 0.1`, report both `*_nn_distance` quantiles beside it, and
+send every close match's `nearest` frame to the leak and identity checks. A pose-conditioned generator, or one
+driven from a pose library, reproduces reference poses by design, so expect a high excess there and do not gate it.
 
 ## How argus-proof should use this
 
@@ -304,8 +345,11 @@ From smk762/argus-proof#122:
 2. **Training-distribution context.** Run `compare_pose_sets(outputs, training)`. A collapsed run with low
    `coverage_divergence` collapsed onto a pose that dominates the training set: a dataset-balance problem for
    curator's coverage panel. High divergence means the model drifted away from the training mix.
-3. **Pose memorisation evidence.** The memorised matches (`matches[].memorised`, `nearest`) name the training
-   frames an output copies in pose. Feed them to the leak check (1) as evidence; do not gate on pose alone.
+3. **Pose copying evidence.** `close_excess >= 0.1` (with at least 20 eligible poses on each side) says the
+   outputs sit closer to the training frames than the frames sit to each other: flag the run for review. The close
+   matches (`matches[].close`, `nearest`) name the training frame each output should be compared against at image
+   level; feed them to the leak and identity checks. Do not gate on pose alone (see
+   [what a close pose match means](#what-a-close-pose-match-means)).
 
 ## Cost
 

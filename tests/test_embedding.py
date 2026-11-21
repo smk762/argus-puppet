@@ -281,3 +281,38 @@ def test_align_to_mean_is_order_independent_and_mirror_invariant() -> None:
     assert np.allclose(a[perm], b) and np.array_equal(am[perm], bm)
     # Every aligned copy of the same (jittered) pose ends up on the same side.
     assert np.ptp(a[:, Joint.LEFT_WRIST, 1]) < 0.5
+
+
+def test_nearest_neighbours_agree_with_the_matrix_across_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from argus_puppet.embedding import CORE_JOINTS, nearest_neighbours
+
+    rng = np.random.default_rng(7)
+    names = list(PRESETS)
+    vs = []
+    for k in range(30):
+        drop = tuple(int(j) for j in rng.choice([7, 8, 9, 10, 13, 14, 15, 16], size=rng.integers(0, 3), replace=False))
+        vs.append(vec(names[k % len(names)], rng=rng, angle_jitter=10, joint_noise=0.02, dropout=drop))
+    c, m = stack(vs)
+    full = pairwise_distances(c, m, dtype=np.float64)
+    for chunk in (1_500_000, 100):
+        monkeypatch.setattr(embedding, "_CHUNK_ELEMENTS", chunk)
+        nn = nearest_neighbours(c, m, c, m, exclude_self=True)
+        for i in range(len(vs)):
+            row = full[i].copy()
+            row[i] = np.nan
+            dd = np.where(np.isfinite(row), row, np.inf)
+            assert nn.index[i] == int(np.argmin(dd)) and nn.distance[i] == pytest.approx(dd.min(), abs=1e-6)
+            j = int(nn.index[i])
+            assert nn.shared[i] == int((m[i][list(CORE_JOINTS)] & m[j][list(CORE_JOINTS)]).sum()) or (
+                nn.shared[i] == int((m[i] & mirror(c[j], m[j])[1])[list(CORE_JOINTS)].sum())
+            )
+            whole = [k for k in range(len(vs)) if k != i and m[k][list(CORE_JOINTS)].all()]
+            if m[i][list(CORE_JOINTS)].all() and whole:
+                best = min(whole, key=lambda k: (full[i, k], k))
+                assert nn.full_index[i] == best and nn.full_shared[i] == 12
+            else:
+                assert nn.full_index[i] == -1 and np.isnan(nn.full_distance[i])
+    empty = nearest_neighbours(c[:0], m[:0], c, m)
+    assert len(empty.index) == 0
+    with pytest.raises(ValueError):
+        nearest_neighbours(c[:3], m[:3], c, m, exclude_self=True)

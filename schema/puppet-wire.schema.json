@@ -103,7 +103,7 @@
             }
           ],
           "default": null,
-          "description": "Memorisation distance (default: compare.DEFAULT_MEMORISATION_THRESHOLD, 0.08).",
+          "description": "Close pose match distance (default: compare.DEFAULT_CLOSE_THRESHOLD, 0.08).",
           "title": "Threshold"
         }
       },
@@ -174,6 +174,50 @@
         }
       },
       "title": "Coverage",
+      "type": "object"
+    },
+    "DistanceQuantiles": {
+      "description": "Quantiles of a set of nearest-neighbour distances (torso units).",
+      "properties": {
+        "n": {
+          "description": "How many distances the quantiles are over.",
+          "minimum": 1,
+          "title": "N",
+          "type": "integer"
+        },
+        "p01": {
+          "description": "1st percentile.",
+          "minimum": 0.0,
+          "title": "P01",
+          "type": "number"
+        },
+        "p10": {
+          "description": "10th percentile.",
+          "minimum": 0.0,
+          "title": "P10",
+          "type": "number"
+        },
+        "p50": {
+          "description": "Median.",
+          "minimum": 0.0,
+          "title": "P50",
+          "type": "number"
+        },
+        "p90": {
+          "description": "90th percentile.",
+          "minimum": 0.0,
+          "title": "P90",
+          "type": "number"
+        }
+      },
+      "required": [
+        "n",
+        "p01",
+        "p10",
+        "p50",
+        "p90"
+      ],
+      "title": "DistanceQuantiles",
       "type": "object"
     },
     "EstimatorProvenance": {
@@ -408,6 +452,14 @@
           "exclusiveMinimum": 0.0,
           "title": "Diversity Scale",
           "type": "number"
+        },
+        "min_close_joints": {
+          "default": 12,
+          "description": "Of the 12 non-head body joints (shoulders, elbows, wrists, hips, knees, ankles), how many two poses must share before their distance can call them a close pose match (compare) or duplicates (library dedupe). 12 means the whole limb skeleton: a waist-up pose is never a close match to a full-body frame.",
+          "maximum": 12,
+          "minimum": 0,
+          "title": "Min Close Joints",
+          "type": "integer"
         },
         "min_joint_score": {
           "default": 0.3,
@@ -820,6 +872,11 @@
     "PoseMatch": {
       "description": "An output image's nearest reference pose.",
       "properties": {
+        "close": {
+          "description": "A close pose match: distance below the comparison's threshold with at least params.min_close_joints shared joints (the whole limb skeleton by default). It means 'the same pose', not 'a copied frame': most same-stance poses match at the default threshold. Use it as a pointer to the training frame an image-level check should compare against; the run-level signal is close_excess.",
+          "title": "Close",
+          "type": "boolean"
+        },
         "distance": {
           "anyOf": [
             {
@@ -839,11 +896,6 @@
           "title": "Image",
           "type": "string"
         },
-        "memorised": {
-          "description": "Whether distance is below the comparison's threshold; always false without a match.",
-          "title": "Memorised",
-          "type": "boolean"
-        },
         "nearest": {
           "anyOf": [
             {
@@ -854,13 +906,28 @@
             }
           ],
           "default": null,
-          "description": "The reference image with the closest pose; null when the output is unusable or shares too few joints with every reference pose (no comparable reference pose).",
+          "description": "The reference image with the closest pose; null when the output is unusable or shares too few joints with every reference pose (no comparable reference pose). When the output is close, the nearest reference that shares the whole limb skeleton with it (which may differ from the nearest partial match).",
           "title": "Nearest"
+        },
+        "shared_joints": {
+          "anyOf": [
+            {
+              "maximum": 12,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Non-head body joints (of 12: shoulders, elbows, wrists, hips, knees, ankles) confident in both poses in the orientation compared; null exactly when nearest is null.",
+          "title": "Shared Joints"
         }
       },
       "required": [
         "image",
-        "memorised"
+        "close"
       ],
       "title": "PoseMatch",
       "type": "object"
@@ -940,8 +1007,57 @@
       "type": "object"
     },
     "PoseSetComparison": {
-      "description": "An output set's poses against a reference (training) set: copied poses and coverage drift.",
+      "description": "An output set's poses against a reference (training) set: close pose matches against the reference set's own\nbaseline, and coverage drift.",
       "properties": {
+        "baseline_close_share": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The same statistic inside the reference set, leave-one-out: the share of eligible reference poses whose nearest *other* reference pose (sharing params.min_close_joints joints) is closer than the threshold. How often training frames are close to each other, i.e. what close_share looks like without any copying. Null with fewer than 2 usable reference poses or none eligible.",
+          "title": "Baseline Close Share"
+        },
+        "baseline_eligible": {
+          "description": "Reference poses that could be close to another reference pose (leave-one-out, same rules).",
+          "minimum": 0,
+          "title": "Baseline Eligible",
+          "type": "integer"
+        },
+        "close_eligible": {
+          "description": "Outputs that could be close: they share at least params.min_close_joints joints with at least one reference pose (in practice: the output and some reference frame both show the whole limb skeleton). close_share is over these.",
+          "minimum": 0,
+          "title": "Close Eligible",
+          "type": "integer"
+        },
+        "close_excess": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "max(0, close_share - baseline_close_share): how much more often outputs sit within the threshold of a training frame than training frames sit to each other. The run-level copying signal; null when baseline_close_share is null.",
+          "title": "Close Excess"
+        },
+        "close_share": {
+          "description": "Close outputs / close_eligible (0 when none is eligible). On its own it is not evidence of copying: compare it with baseline_close_share.",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Close Share",
+          "type": "number"
+        },
         "coverage_divergence": {
           "description": "Jensen-Shannon divergence (base 2) between the output and reference coverage histograms, averaged over stance, arms and facing: 0 = same mix of poses, 1 = disjoint.",
           "maximum": 1.0,
@@ -962,7 +1078,7 @@
           "description": "The estimator that produced every pose on both sides, when they all share one."
         },
         "matched_count": {
-          "description": "Outputs with a nearest reference pose: usable, and comparable with at least one usable reference pose. memorised_share is over these.",
+          "description": "Outputs with a nearest reference pose: usable, and comparable with at least one usable reference pose.",
           "minimum": 0,
           "title": "Matched Count",
           "type": "integer"
@@ -975,13 +1091,6 @@
           "title": "Matches",
           "type": "array"
         },
-        "memorised_share": {
-          "description": "Memorised outputs / matched_count (0 when nothing matched). Unusable and unmatched outputs are left out of the denominator: they are no evidence either way.",
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Memorised Share",
-          "type": "number"
-        },
         "output_count": {
           "description": "Output images compared, usable or not (one match entry each).",
           "minimum": 0,
@@ -990,6 +1099,18 @@
         },
         "output_coverage": {
           "$ref": "#/$defs/Coverage"
+        },
+        "output_nn_distance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistanceQuantiles"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Quantiles, over the eligible outputs, of the distance to the nearest reference pose sharing params.min_close_joints joints; null when no output is eligible."
         },
         "params": {
           "$ref": "#/$defs/MetricParams"
@@ -1008,8 +1129,20 @@
         "reference_coverage": {
           "$ref": "#/$defs/Coverage"
         },
+        "reference_nn_distance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DistanceQuantiles"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Quantiles, over the eligible reference poses, of the distance to the nearest other reference pose sharing params.min_close_joints joints (leave-one-out); null when baseline_close_share is null. Outputs whose quantiles sit well below these are closer to the training frames than the frames are to each other."
+        },
         "threshold": {
-          "description": "Pose distance below which an output counts as memorised.",
+          "description": "Pose distance below which a match can be close.",
           "minimum": 0.0,
           "title": "Threshold",
           "type": "number"
@@ -1019,7 +1152,9 @@
         "output_count",
         "matched_count",
         "reference_count",
-        "memorised_share",
+        "close_eligible",
+        "close_share",
+        "baseline_eligible",
         "threshold",
         "coverage_divergence",
         "params"

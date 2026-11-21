@@ -13,6 +13,7 @@ from argus_puppet.models import (
     PUPPET_VERSION,
     SIDECAR_SUFFIX,
     Coverage,
+    DistanceQuantiles,
     EstimatorProvenance,
     Health,
     MetricParams,
@@ -173,10 +174,16 @@ def test_comparison() -> None:
         matched_count=1,
         reference_count=4,
         matches=[
-            PoseMatch(image="o.png", nearest="t.jpg", distance=0.05, memorised=True),
-            PoseMatch(image="u.png", memorised=False),
+            PoseMatch(image="o.png", nearest="t.jpg", distance=0.05, shared_joints=12, close=True),
+            PoseMatch(image="u.png", close=False),
         ],
-        memorised_share=1.0,
+        close_eligible=1,
+        close_share=1.0,
+        baseline_eligible=4,
+        baseline_close_share=0.25,
+        close_excess=0.75,
+        output_nn_distance=DistanceQuantiles(n=1, p01=0.05, p10=0.05, p50=0.05, p90=0.05),
+        reference_nn_distance=DistanceQuantiles(n=4, p01=0.03, p10=0.04, p50=0.2, p90=0.5),
         threshold=0.1,
         coverage_divergence=0.2,
         params=params(),
@@ -186,16 +193,23 @@ def test_comparison() -> None:
         cmp.model_validate({**cmp.model_dump(), "matched_count": 2})
     with pytest.raises(ValidationError, match="matches"):
         cmp.model_validate({**cmp.model_dump(), "output_count": 3})
-    with pytest.raises(ValidationError, match="both"):
-        PoseMatch(image="o.png", nearest="t.jpg", memorised=False)
-    with pytest.raises(ValidationError, match="memorised"):
-        PoseMatch(image="o.png", memorised=True)
+    with pytest.raises(ValidationError, match="all set or all null"):
+        PoseMatch(image="o.png", nearest="t.jpg", distance=0.1, close=False)
+    with pytest.raises(ValidationError, match="cannot be close"):
+        PoseMatch(image="o.png", close=True)
+    with pytest.raises(ValidationError, match="close_eligible"):
+        cmp.model_validate({**cmp.model_dump(), "close_eligible": 2})
+    with pytest.raises(ValidationError, match="close_excess"):
+        cmp.model_validate({**cmp.model_dump(), "close_excess": None})
+    with pytest.raises(ValidationError):
+        PoseMatch(image="o.png", nearest="t.jpg", distance=0.1, shared_joints=13, close=False)
 
 
 def test_metric_params_default_to_the_suite_defaults() -> None:
     p = MetricParams()
     assert (p.min_joint_score, p.min_usable_joints, p.cluster_threshold) == (0.3, 8, 0.25)
     assert (p.min_shared_joints, p.min_shared_limb_joints, p.diversity_scale) == (6, 2, 0.3)
+    assert p.min_close_joints == 12
     assert MetricParams.model_validate({}) == p
     with pytest.raises(ValidationError):
         MetricParams(diversity_scale=0)

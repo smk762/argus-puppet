@@ -62,6 +62,12 @@ JOINT_WEIGHTS.setflags(write=False)
 LIMB_JOINTS: tuple[int, ...] = (L_ELBOW, R_ELBOW, L_WRIST, R_WRIST, L_KNEE, R_KNEE, L_ANKLE, R_ANKLE)
 _IS_LIMB = np.zeros(NUM_JOINTS, dtype=bool)
 _IS_LIMB[list(LIMB_JOINTS)] = True
+# The 12 non-head body joints: shoulders, elbows, wrists, hips, knees, ankles (the whole limb skeleton). A pose
+# comparison that shares all of them covers the whole body; one that does not is a partial comparison.
+CORE_JOINTS: tuple[int, ...] = tuple(range(L_SHOULDER, NUM_JOINTS))
+NUM_CORE_JOINTS = len(CORE_JOINTS)  # 12
+_IS_CORE = np.zeros(NUM_JOINTS, dtype=bool)
+_IS_CORE[list(CORE_JOINTS)] = True
 
 # The flip permutation restricted to the body: body joints only ever swap with body joints.
 BODY_FLIP: np.ndarray = np.asarray(FLIP_PERMUTATION[:NUM_JOINTS], dtype=np.intp)
@@ -385,6 +391,94 @@ def _block(
     d1 = _oriented(a, ma, b, mb, min_shared, min_limb)
     d2 = _oriented(a, ma, bm, mbm, min_shared, min_limb)
     return np.fmin(d1, d2)  # the smaller valid one; NaN only when neither orientation shares enough joints
+
+
+def _core_shared(ma: np.ndarray, mb: np.ndarray, mbm: np.ndarray, d1: np.ndarray, d2: np.ndarray) -> np.ndarray:
+    """Core joints shared in the orientation :func:`_block` chose (``(c, n)``, float)."""
+    fa = (ma & _IS_CORE).astype(_WORK)
+    c1 = fa @ mb.astype(_WORK).T
+    c2 = fa @ mbm.astype(_WORK).T
+    use2 = np.isnan(d1) | (d2 < d1)  # np.fmin's choice: d2 when d1 is NaN or d2 is smaller
+    return np.where(use2, c2, c1)
+
+
+@dataclass(frozen=True)
+class Nearest:
+    """Each query pose's nearest pose in a set (see :func:`nearest_neighbours`); ``-1`` / NaN where there is none.
+
+    ``index``/``distance``/``shared`` are the nearest comparable pose, ``shared`` the core joints (of
+    :data:`NUM_CORE_JOINTS`) the comparison shared. ``full_index``/``full_distance`` are the nearest pose among those
+    sharing at least ``min_core_joints`` core joints, and ``full_shared`` the core joints that comparison shared.
+    """
+
+    index: np.ndarray  # (M,) intp
+    distance: np.ndarray  # (M,) float64
+    shared: np.ndarray  # (M,) intp
+    full_index: np.ndarray  # (M,) intp
+    full_distance: np.ndarray  # (M,) float64
+    full_shared: np.ndarray  # (M,) intp
+
+
+def nearest_neighbours(
+    coords_a: np.ndarray,
+    mask_a: np.ndarray,
+    coords_b: np.ndarray,
+    mask_b: np.ndarray,
+    *,
+    min_shared_joints: int = DEFAULT_MIN_SHARED_JOINTS,
+    min_shared_limb_joints: int = DEFAULT_MIN_SHARED_LIMB_JOINTS,
+    min_core_joints: int = NUM_CORE_JOINTS,
+    exclude_self: bool = False,
+) -> Nearest:
+    """For each of M poses, its nearest of N poses under the mirror-invariant distance, and its nearest among those
+    sharing at least *min_core_joints* of the 12 core joints with it (the whole limb skeleton by default).
+
+    Ties go to the lowest index. *exclude_self* (a and b the same set) leaves each pose's own row out: the
+    leave-one-out nearest neighbour. Computed in row chunks, so memory stays a few tens of MB and no M x N matrix
+    is ever held.
+    """
+    a = np.asarray(coords_a, dtype=_WORK)
+    ma = np.asarray(mask_a, dtype=bool)
+    b = np.asarray(coords_b, dtype=_WORK)
+    mb = np.asarray(mask_b, dtype=bool)
+    if exclude_self and len(a) != len(b):
+        raise ValueError("exclude_self needs the same set on both sides")
+    m = len(a)
+    out = Nearest(
+        index=np.full(m, -1, dtype=np.intp),
+        distance=np.full(m, np.nan),
+        shared=np.zeros(m, dtype=np.intp),
+        full_index=np.full(m, -1, dtype=np.intp),
+        full_distance=np.full(m, np.nan),
+        full_shared=np.zeros(m, dtype=np.intp),
+    )
+    if m == 0 or len(b) == 0:
+        return out
+    bm, mbm = mirror(b, mb)
+    bm = bm.astype(_WORK)
+    step = _rows_per_chunk(len(b))
+    for i in range(0, m, step):
+        j = slice(i, i + step)
+        d1 = _oriented(a[j], ma[j], b, mb, min_shared_joints, min_shared_limb_joints)
+        d2 = _oriented(a[j], ma[j], bm, mbm, min_shared_joints, min_shared_limb_joints)
+        d = np.fmin(d1, d2)
+        core = _core_shared(ma[j], mb, mbm, d1, d2)
+        rows = np.arange(d.shape[0])
+        if exclude_self:
+            d[rows, rows + i] = np.nan
+        dd = np.where(np.isfinite(d), d, np.inf)
+        k = np.argmin(dd, axis=1)
+        found = np.isfinite(dd[rows, k])
+        out.index[j] = np.where(found, k, -1)
+        out.distance[j] = np.where(found, d[rows, k], np.nan)
+        out.shared[j] = np.where(found, np.rint(core[rows, k]), 0)
+        dd[core < min_core_joints - 0.5] = np.inf
+        k = np.argmin(dd, axis=1)
+        found = np.isfinite(dd[rows, k])
+        out.full_index[j] = np.where(found, k, -1)
+        out.full_distance[j] = np.where(found, d[rows, k], np.nan)
+        out.full_shared[j] = np.where(found, np.rint(core[rows, k]), 0)
+    return out
 
 
 def pose_distance(

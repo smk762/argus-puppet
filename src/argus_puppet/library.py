@@ -33,7 +33,6 @@ import structlog
 from PIL import Image
 
 from argus_puppet.age import ADULT_AGE, AgeEstimator, AgeUnavailable
-from argus_puppet.compare import DEFAULT_MEMORISATION_THRESHOLD
 from argus_puppet.labels import pose_labels
 from argus_puppet.metrics import (
     DEFAULT_PARAMS,
@@ -88,7 +87,7 @@ DEFAULT_MIN_BODY_SCORE = 0.3
 # (standing vs hands on hips) 0.12 apart. 0.08 removes nearly every re-estimated copy (a burst of frames, the same
 # photo at two sizes) and stays a third below the closest distinct pair, so no real pose variety is thrown away;
 # the rare copy that survives just costs one extra entry. See docs/conditioning.md.
-DEFAULT_DEDUPE_THRESHOLD = DEFAULT_MEMORISATION_THRESHOLD
+DEFAULT_DEDUPE_THRESHOLD = 0.08
 
 
 def default_distance_matrix(poses: Sequence[np.ndarray]) -> np.ndarray:

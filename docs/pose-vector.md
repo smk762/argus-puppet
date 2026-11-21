@@ -1,7 +1,7 @@
 # The pose vector and pose distance
 
 `argus_puppet.embedding` turns one person's keypoints into a normalised pose vector and compares two vectors with a
-mirror-invariant distance. Everything downstream (set diversity, clustering, the 2D scatter, the memorisation check)
+mirror-invariant distance. Everything downstream (set diversity, clustering, the 2D scatter, the close-match check)
 is built on this one distance, so this page states it exactly.
 
 ## Input
@@ -83,7 +83,7 @@ not count as a wrist at the hip.
 ### Not rotation-invariant
 
 The vector keeps the image's axes. A standing and a lying person, or an upright and an inverted one, are different
-poses for diversity and memorisation purposes, and stay far apart (standing vs lying is about 1.3 torso units on
+poses for diversity and close-match purposes, and stay far apart (standing vs lying is about 1.3 torso units on
 the synthetic figures; the cluster threshold is 0.25).
 
 ## Mirroring

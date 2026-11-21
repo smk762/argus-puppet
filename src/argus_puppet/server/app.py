@@ -422,7 +422,7 @@ def create_app(
             req = await read_json(request, CompareRequest, cap)
             outputs = await asyncio.to_thread(load_set, settings, req.outputs, "outputs")
             reference = await asyncio.to_thread(load_set, settings, req.reference, "reference")
-            threshold = compare.DEFAULT_MEMORISATION_THRESHOLD if req.threshold is None else req.threshold
+            threshold = compare.DEFAULT_CLOSE_THRESHOLD if req.threshold is None else req.threshold
             return await asyncio.to_thread(
                 compare.compare_pose_sets, outputs, reference, threshold=threshold, params=req.params
             )

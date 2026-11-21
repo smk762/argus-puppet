@@ -24,7 +24,7 @@ images ──▶ extract ──▶ PoseResult (<stem>.pose.json)
 | Extract | A person detector (YOLOX) finds each person; a pose model (DWPose) places 133 keypoints in each box. One person is marked primary, by argus-curator's primary-face rule | `PoseResult`, saved beside the image as a `<stem>.pose.json` sidecar. It records the SHA-256 of both models |
 | Pose vector | The primary person's 17 body joints are centred on the hips, scaled by torso length, with low-confidence joints masked. The distance between two vectors ignores left/right mirroring | A distance in torso units that every later stage uses |
 | Stats | Pairwise distances over a set, clustered; geometry rules label each pose's stance, arms and facing | `PoseSetStats`: a 0 to 1 diversity score, cluster sizes and medoids, label coverage |
-| Compare | Each output pose's nearest pose in a reference set | `PoseSetComparison`: matches, memorised share, coverage drift |
+| Compare | Each output pose's nearest pose in a reference set | `PoseSetComparison`: matches, close-match share against the reference set's own baseline, coverage drift |
 | Render | Keypoints drawn in the OpenPose colour convention most pose ControlNets were trained on | A PNG control image |
 | Library | Primary poses from a folder, labelled, deduplicated, clustered; sampled so a batch spreads across the poses | `PoseLibrary` JSON, and control images for a sampled batch |
 
@@ -46,13 +46,14 @@ descriptions there are authoritative.
 
 ## Which page do I need
 
-**argus-proof: the pose-diversity gate and memorisation evidence.** Pose the outputs (and the training set, for
+**argus-proof: the pose-diversity gate and pose-copying evidence.** Pose the outputs (and the training set, for
 comparison) with `POST /pose/scan` or `argus-puppet pose`, then read `diversity` from `POST /stats` or
 `pose_set_stats`. [metrics.md](metrics.md#how-argus-proof-should-use-this) gives the suggested gate (enough usable
 and comparable poses first, then reject `pose_collapse` when `diversity < 0.3` or `largest_cluster_share >= 0.75`),
 what to report beside it, and how to read
-`POST /compare`. A pose match to a training frame is evidence, not proof, of memorisation: use it beside the
-identity and image-similarity checks.
+`POST /compare`. At the close threshold most same-stance poses match some training frame, so a per-output close
+match only says which frame an image-level check (leak, identity) should look at; the run-level signal is
+`close_share` well above the training set's own `baseline_close_share`.
 
 **argus-curator: body-pose coverage.** `PoseSetStats.coverage` counts stance, arms and facing labels, and
 `largest_cluster_share` with the cluster's `medoid` says when one pose dominates a set before training. The labels
