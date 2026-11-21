@@ -6,8 +6,22 @@ Routes:
 * ``POST /pose`` -> :class:`~argus_puppet.models.PoseResult` for one image (raw bytes or a multipart file). Writes
   nothing. ``?name=`` names the image in the result; ``?face=x,y,w,h`` is a primary-face hint. Concurrency is
   bounded (``ARGUS_PUPPET_POSE_CONCURRENCY``): a call past it is answered 503 + Retry-After, not queued.
-* ``POST /pose/scan`` ``{path, recursive, overwrite}`` -> :class:`~argus_puppet.extract.ScanSummary`. Writes
-  sidecars under ``ARGUS_PUPPET_DATA_ROOT``; *path* is fenced under it with :func:`argus_cortex.fs.safe_join`.
+* ``POST /pose/scan`` :class:`~argus_puppet.models.ScanRequest` ``{path, recursive, overwrite}`` ->
+  :class:`~argus_puppet.models.ScanSummary`. Writes sidecars under ``ARGUS_PUPPET_DATA_ROOT``; *path* is fenced under
+  it with :func:`argus_cortex.fs.safe_join`.
+* ``POST /stats`` :class:`~argus_puppet.models.StatsRequest` (``{results}`` or ``{path, recursive}``, ``params``) ->
+  :class:`~argus_puppet.models.PoseSetStats`. Writes nothing.
+* ``POST /compare`` :class:`~argus_puppet.models.CompareRequest` (``outputs`` and ``reference``, each results or a
+  path; ``threshold``, ``params``) -> :class:`~argus_puppet.models.PoseSetComparison`. Writes nothing.
+* ``POST /render`` :class:`~argus_puppet.models.RenderRequest` (``pose``: a PoseResult or ``{keypoints, width,
+  height}``; ``options``) -> ``image/png``. Writes nothing.
+
+A set given as ``path`` is the ``*.pose.json`` sidecars of a folder under the data root, fenced as ``/pose/scan``
+fences its path (409 without a data root, 400 outside it, 404 missing). A set holds at most
+``ARGUS_PUPPET_MAX_SET_RESULTS`` results (413 past it: the distance matrix is O(N^2)); a JSON body at most
+``ARGUS_PUPPET_MAX_JSON_BYTES`` (413); a render canvas at most ``ARGUS_PUPPET_MAX_PIXELS`` pixels and
+``ARGUS_PUPPET_MAX_PEOPLE`` people (413). The compute routes share one admission bound
+(``ARGUS_PUPPET_POSE_CONCURRENCY``; 503 + Retry-After past it).
 
 There is no auth: reaching the port is host access. Every unsafe method passes the origin
 :class:`~argus_cortex.server.WriteGuard` (another site's page is refused), then, in read-only mode, a second guard
@@ -25,20 +39,33 @@ import contextlib
 import math
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, TypeVar
 
-from argus_cortex.fs import PathRefused, safe_basename, safe_join
+from argus_cortex.fs import PathRefused, is_within, safe_basename, safe_join
 from argus_cortex.gpu import GpuCoordinator, free_vram_mb
 from argus_cortex.limits import BadInput, TooLarge, read_body, read_upload
 from argus_cortex.server import WriteGuard, constant_refuse, cross_site_refuse
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ValidationError
 
-from argus_puppet import __version__, extract, gpu, registry, runtime
+from argus_puppet import __version__, compare, extract, gpu, metrics, registry, render, runtime, sidecars
 from argus_puppet import estimator as estimator_mod
 from argus_puppet.config import Settings
-from argus_puppet.models import Health, PoseResult
+from argus_puppet.models import (
+    BarePose,
+    CompareRequest,
+    Health,
+    PoseResult,
+    PoseSetComparison,
+    PoseSetSource,
+    PoseSetStats,
+    RenderRequest,
+    ScanRequest,
+    ScanSummary,
+    StatsRequest,
+)
 
 READ_ONLY_REFUSAL = "argus-puppet is read-only (ARGUS_PUPPET_READ_ONLY): state-changing requests are refused"
 # A multipart body's Content-Length counts boundaries and part headers too: the declared-length pre-check allows this
@@ -47,14 +74,6 @@ MULTIPART_OVERHEAD = 64 * 1024
 RAW_TYPES = ("application/octet-stream", "image/")
 BUSY_RETRY_S = 1
 GPU_RETRY_S = 5
-
-
-class ScanRequest(BaseModel):
-    """``POST /pose/scan``: a folder under the data root to pose into sidecars."""
-
-    path: str = Field(..., description="Folder (or one image) relative to ARGUS_PUPPET_DATA_ROOT.")
-    recursive: bool = Field(False, description="Include subfolders.")
-    overwrite: bool = Field(False, description="Re-pose images that already have a sidecar.")
 
 
 class Admission:
@@ -82,13 +101,14 @@ class Admission:
 
 @dataclass
 class AppState:
-    """What routes share; ``app.state.puppet``. Later routes (``/stats``, ``/compare``, ``/render``) use it too."""
+    """What routes share; ``app.state.puppet``."""
 
     settings: Settings
     coordinator: GpuCoordinator | None = None
     fixed_estimator: estimator_mod.Estimator | None = None
     admit: Admission = field(default_factory=lambda: Admission(1))
     scan_admit: Admission = field(default_factory=lambda: Admission(1))
+    compute_admit: Admission = field(default_factory=lambda: Admission(1))
 
     def estimator(self) -> estimator_mod.Estimator:
         """The injected estimator, else the shared one for the settings (cheap: its sessions load lazily)."""
@@ -181,14 +201,115 @@ def health(state: AppState) -> Health:
     settings = state.settings
     cuda = runtime.uses_cuda(settings.device)
     est = state.fixed_estimator or estimator_mod.get_estimator(settings)
+    try:
+        coordinator = (state.coordinator or gpu.default_coordinator()).name
+    except ValueError:  # an unknown ARGUS_GPU_COORDINATOR: leases would fail the same way
+        coordinator = "invalid"
     return Health(
         version=__version__,
         read_only=settings.read_only,
         models={n: runtime.model_verified(settings, n) for n in registry.names()},
+        pose_model=settings.pose_model,
+        detector_model=settings.detector_model,
         provider=getattr(est, "provider", None),
         device="cuda" if cuda else "cpu",
+        gpu_coordinator=coordinator,
         free_vram_mb=free_vram_mb(0) if cuda else None,
     )
+
+
+# ── JSON bodies and pose sets ────────────────────────────────────────────────────────────────────────────────────
+
+
+M = TypeVar("M", bound=BaseModel)
+
+
+async def read_json(request: Request, model: type[M], cap: int) -> M:
+    """The JSON body of a ``POST`` as *model*: at most *cap* bytes (413), JSON (415 otherwise), valid (422 with the
+    errors, never echoing the input). Validation runs off the event loop: a large set takes a while."""
+    content_type = (request.headers.get("content-type") or "").lower()
+    if content_type and not content_type.startswith("application/json"):
+        raise HTTPException(415, "send the request as application/json")
+    try:
+        body = await read_body(request, cap, what="request body")
+    except TooLarge as exc:
+        raise HTTPException(413, str(exc)) from None
+    except BadInput as exc:
+        raise HTTPException(400, str(exc)) from None
+    try:
+        return await asyncio.to_thread(model.model_validate_json, body)
+    except ValidationError as exc:
+        raise HTTPException(422, exc.errors(include_url=False, include_input=False, include_context=False)) from None
+
+
+def _too_many(n: int, settings: Settings) -> HTTPException:
+    return HTTPException(
+        413, f"{n} poses in one set is over the cap of {settings.max_set_results} (ARGUS_PUPPET_MAX_SET_RESULTS)"
+    )
+
+
+def fence_set_path(settings: Settings, path: str, label: str = "path") -> Path:
+    """A set's folder under the data root: 409 without a root, 400 outside it or not a folder, 404 missing."""
+    root = settings.data_root
+    if root is None:
+        raise HTTPException(409, "no data root is configured (ARGUS_PUPPET_DATA_ROOT): sets given by path are off")
+    try:
+        target = safe_join(root, path, allow_root=True, label=label)
+    except PathRefused as exc:
+        raise HTTPException(400, str(exc)) from None
+    if not target.exists():
+        raise HTTPException(404, f"{path!r} does not exist under the data root")
+    if not target.is_dir():
+        raise HTTPException(400, f"{label}: {path!r} is not a folder")
+    return target
+
+
+def load_set(settings: Settings, source: PoseSetSource, label: str) -> list[PoseResult]:
+    """The poses of a set: inline, or every sidecar under its fenced folder (blocking: call it off the event loop).
+
+    A sidecar resolving outside the data root (a symlink) is skipped; an invalid one is 422, named relative to the
+    data root."""
+    if source.results is not None:
+        if len(source.results) > settings.max_set_results:
+            raise _too_many(len(source.results), settings)
+        return source.results
+    assert source.path is not None  # the model allows exactly one of results and path
+    target = fence_set_path(settings, source.path, label=f"{label}.path")
+    root = settings.data_root
+    assert root is not None  # fence_set_path refused otherwise
+    found = [p for p in sidecars.find_sidecars(target, recursive=source.recursive) if is_within(root, p)]
+    if len(found) > settings.max_set_results:
+        raise _too_many(len(found), settings)
+    out = []
+    for path in found:
+        try:
+            out.append(sidecars.load_sidecar(path))
+        except sidecars.SidecarError:
+            raise HTTPException(422, f"{path.relative_to(root).as_posix()} is not a valid pose sidecar") from None
+    return out
+
+
+def check_render(settings: Settings, req: RenderRequest) -> None:
+    """413 for a canvas over the pixel cap or more people than the people cap."""
+    pose = req.pose
+    if isinstance(pose, BarePose):
+        n = len(pose.people())
+    else:
+        n = (1 if pose.primary is not None else 0) if req.options.primary_only else len(pose.people)
+    source = (pose.width, pose.height)
+    if n > settings.max_people:
+        raise HTTPException(413, f"{n} people is over the cap of {settings.max_people} (ARGUS_PUPPET_MAX_PEOPLE)")
+    w, h = render.canvas_size(source, req.options)
+    if w * h > settings.max_pixels:
+        raise HTTPException(413, f"a {w}x{h} canvas is over the cap of {settings.max_pixels} pixels")
+
+
+def render_request(req: RenderRequest) -> bytes:
+    """The PNG for a checked render request (blocking)."""
+    pose = req.pose
+    if isinstance(pose, BarePose):
+        return render.render_png(pose.people(), req.options, source_size=(pose.width, pose.height))
+    return render.render_png(pose, req.options)
 
 
 def create_app(
@@ -204,6 +325,7 @@ def create_app(
         coordinator=coordinator,
         fixed_estimator=estimator,
         admit=Admission(settings.pose_concurrency),
+        compute_admit=Admission(settings.pose_concurrency),
     )
     app = FastAPI(
         title="argus-puppet",
@@ -253,8 +375,8 @@ def create_app(
             except Exception as exc:  # noqa: BLE001 - model_errors maps what it knows and re-raises the rest
                 raise model_errors(exc) from None
 
-    @app.post("/pose/scan", response_model=extract.ScanSummary)
-    async def post_scan(req: ScanRequest) -> extract.ScanSummary:
+    @app.post("/pose/scan", response_model=ScanSummary)
+    async def post_scan(req: ScanRequest) -> ScanSummary:
         """Pose a folder under the data root into ``<stem>.pose.json`` sidecars (the one state-changing route)."""
         root = settings.data_root
         if root is None:
@@ -281,6 +403,41 @@ def create_app(
                 )
             except Exception as exc:  # noqa: BLE001 - model_errors maps what it knows and re-raises the rest
                 raise model_errors(exc) from None
+
+    cap = settings.max_json_bytes
+
+    @app.post("/stats", response_model=PoseSetStats)
+    async def post_stats(request: Request) -> PoseSetStats:
+        """Pose diversity, clusters and coverage of one set: ``StatsRequest`` (results, or a sidecar folder under the
+        data root, and optional ``params``). Writes nothing."""
+        async with state.compute_admit.slot():
+            req = await read_json(request, StatsRequest, cap)
+            results = await asyncio.to_thread(load_set, settings, req, "set")
+            return await asyncio.to_thread(metrics.pose_set_stats, results, params=req.params)
+
+    @app.post("/compare", response_model=PoseSetComparison)
+    async def post_compare(request: Request) -> PoseSetComparison:
+        """An output set's poses against a reference set: ``CompareRequest``. Writes nothing."""
+        async with state.compute_admit.slot():
+            req = await read_json(request, CompareRequest, cap)
+            outputs = await asyncio.to_thread(load_set, settings, req.outputs, "outputs")
+            reference = await asyncio.to_thread(load_set, settings, req.reference, "reference")
+            threshold = compare.DEFAULT_MEMORISATION_THRESHOLD if req.threshold is None else req.threshold
+            return await asyncio.to_thread(
+                compare.compare_pose_sets, outputs, reference, threshold=threshold, params=req.params
+            )
+
+    @app.post("/render", response_class=Response, responses={200: {"content": {"image/png": {}}}})
+    async def post_render(request: Request) -> Response:
+        """An OpenPose-convention control PNG for one pose: ``RenderRequest``. Writes nothing."""
+        async with state.compute_admit.slot():
+            req = await read_json(request, RenderRequest, cap)
+            check_render(settings, req)
+            try:
+                png = await asyncio.to_thread(render_request, req)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from None
+            return Response(content=png, media_type="image/png")
 
     return app
 

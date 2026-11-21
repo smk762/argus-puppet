@@ -252,3 +252,25 @@ def test_load_sidecars_reports_or_skips_a_bad_file(tmp_path) -> None:
 def test_load_sidecars_needs_a_directory(tmp_path) -> None:
     with pytest.raises(NotADirectoryError):
         load_sidecars(tmp_path / "missing")
+
+
+def test_every_param_is_honoured_and_recorded() -> None:
+    rng = np.random.default_rng(11)
+    rs = sample(rng, NAMES, 12)
+    base = pose_set_stats(rs)
+    assert base.params == DEFAULT_PARAMS == MetricParams()
+    wide = pose_set_stats(rs, params=MetricParams(diversity_scale=3.0))
+    assert wide.params.diversity_scale == 3.0 and wide.diversity < base.diversity
+    assert wide.mean_pairwise_distance == pytest.approx(base.mean_pairwise_distance)
+    # Hide both ankles everywhere: with 16 shared joints required, no pair is comparable any more.
+    hidden = []
+    for r in rs:
+        kp = r.people[0].keypoints_array()
+        kp[[15, 16], 2] = 0.0
+        hidden.append(result(r.image, kp))
+    strict = pose_set_stats(hidden, params=MetricParams(min_shared_joints=16))
+    assert strict.params.min_shared_joints == 16
+    assert strict.mean_pairwise_distance == 0.0 and strict.cluster_count == strict.usable  # every pose alone
+    assert pose_set_stats(hidden).mean_pairwise_distance > 0  # the default (6 shared) still compares them
+    no_limbs = pose_set_stats(hidden, params=MetricParams(min_shared_limb_joints=7))
+    assert no_limbs.mean_pairwise_distance == 0.0  # only 6 limb joints left in each pose

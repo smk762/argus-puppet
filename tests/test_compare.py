@@ -11,7 +11,7 @@ from argus_puppet.compare import (
     js_divergence,
 )
 from argus_puppet.metrics import coverage
-from argus_puppet.models import PoseLabels, PoseSetComparison
+from argus_puppet.models import MetricParams, PoseLabels, PoseSetComparison
 
 NAMES = list(PRESETS)
 # The reference library leaves two presets out, so outputs drawn from them are genuinely new poses.
@@ -45,7 +45,7 @@ def test_finds_the_planted_near_duplicate() -> None:
     assert by_image["out/copy.png"].distance < DEFAULT_MEMORISATION_THRESHOLD
     assert not by_image["out/fresh-a.png"].memorised and not by_image["out/fresh-b.png"].memorised
     assert cmp.memorised_share == pytest.approx(1 / 3)
-    assert (cmp.output_count, cmp.reference_count) == (3, 40)
+    assert (cmp.output_count, cmp.matched_count, cmp.reference_count) == (3, 3, 40)
     assert PoseSetComparison.model_validate_json(cmp.model_dump_json()) == cmp
 
 
@@ -64,15 +64,38 @@ def test_same_stance_different_pose_is_not_memorised() -> None:
     assert cmp.matches[0].distance > DEFAULT_MEMORISATION_THRESHOLD and not cmp.matches[0].memorised
 
 
-def test_unusable_outputs_have_no_match_and_are_not_counted() -> None:
-    outputs = [result("none.png", None), result("ok.png", make("t_pose"))]
+def test_unusable_outputs_are_listed_unmatched_and_left_out_of_the_share() -> None:
+    sparse = make("t_pose")
+    sparse[:17, 2] = 0.0
+    sparse[[5, 6, 11, 12, 0, 1, 2, 3, 4], 2] = 0.9  # usable (9 joints) but no limb joint: comparable with nothing
+    outputs = [result("none.png", None), result("ok.png", make("t_pose")), result("sparse.png", sparse)]
     cmp = compare_pose_sets(outputs, [result("t.png", make("t_pose"))])
-    assert [m.image for m in cmp.matches] == ["ok.png"] and cmp.output_count == 1
+    assert [m.image for m in cmp.matches] == ["none.png", "ok.png", "sparse.png"]
+    by = {m.image: m for m in cmp.matches}
+    for unmatched in ("none.png", "sparse.png"):
+        assert by[unmatched].nearest is None and by[unmatched].distance is None and not by[unmatched].memorised
+    assert by["ok.png"].nearest == "t.png" and by["ok.png"].memorised
+    assert (cmp.output_count, cmp.matched_count) == (3, 1)
+    assert cmp.memorised_share == 1.0  # over the matched output only
+    assert PoseSetComparison.model_validate_json(cmp.model_dump_json()) == cmp
+
+
+def test_params_are_honoured_and_recorded() -> None:
+    out, ref = [result("o.png", make("hands_on_hips"))], [result("t.png", make("standing"))]
+    strict = MetricParams(min_shared_joints=17)  # every body joint shared: the synthetic figures hide none
+    assert compare_pose_sets(out, ref, params=strict).params == strict
+    hidden = make("standing")
+    hidden[15:17, 2] = 0.0  # no ankles
+    cmp = compare_pose_sets(out, [result("t.png", hidden)], params=strict)
+    assert cmp.matches[0].nearest is None and cmp.matched_count == 0
+    assert compare_pose_sets(out, [result("t.png", hidden)]).matched_count == 1  # the default (6 shared) matches
 
 
 def test_empty_reference() -> None:
     cmp = compare_pose_sets([result("o.png", make("standing"))], [])
-    assert cmp.matches == [] and cmp.memorised_share == 0.0 and cmp.reference_count == 0
+    assert [(m.image, m.nearest, m.distance) for m in cmp.matches] == [("o.png", None, None)]
+    assert cmp.memorised_share == 0.0 and cmp.reference_count == 0
+    assert (cmp.output_count, cmp.matched_count) == (1, 0)
     assert cmp.coverage_divergence == 1.0  # one side has poses, the other has none
 
 

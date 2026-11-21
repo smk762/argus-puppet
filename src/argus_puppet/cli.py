@@ -18,7 +18,7 @@ from argus_puppet.config import DEVICES, ConfigError, Settings
 from argus_puppet.models import SCHEMA_PATH
 
 if TYPE_CHECKING:
-    from argus_puppet.extract import ScanSummary
+    from argus_puppet.models import ScanSummary
 
 app = typer.Typer(
     help="Body pose for the Argus suite: whole-body keypoints, pose metrics and ControlNet pose conditioning.",

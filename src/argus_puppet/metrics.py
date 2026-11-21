@@ -17,8 +17,6 @@ from dataclasses import dataclass
 import numpy as np
 
 from argus_puppet.embedding import (
-    DEFAULT_MIN_JOINT_SCORE,
-    DEFAULT_MIN_USABLE_JOINTS,
     JOINT_WEIGHTS,
     PoseVector,
     align_to_mean,
@@ -29,8 +27,11 @@ from argus_puppet.embedding import (
 )
 from argus_puppet.labels import pose_labels
 from argus_puppet.models import (
+    DEFAULT_CLUSTER_THRESHOLD,
+    DEFAULT_DIVERSITY_SCALE,
     Arms,
     Coverage,
+    EstimatorProvenance,
     Facing,
     MetricParams,
     PoseCluster,
@@ -43,22 +44,28 @@ from argus_puppet.models import (
 
 # ── defaults ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
-# Average-linkage cut, in torso units. Two renders of one pose with estimator-level noise and a few degrees of limb
-# variation sit 0.05-0.2 apart; the nearest distinct presets of the synthetic library (standing vs hands-on-hips,
-# T-pose vs reach) sit 0.35 and more apart, and different stances 0.6-1.5. See docs/metrics.md.
-DEFAULT_CLUSTER_THRESHOLD = 0.25
-
-DEFAULT_PARAMS = MetricParams(
-    min_joint_score=DEFAULT_MIN_JOINT_SCORE,
-    min_usable_joints=DEFAULT_MIN_USABLE_JOINTS,
-    cluster_threshold=DEFAULT_CLUSTER_THRESHOLD,
-)
-
-# Diversity is the mean, over comparable pairs, of g(d) = 1 - exp(-(d / DIVERSITY_SCALE)^2): a pair at distance 0
-# adds nothing, a pair DIVERSITY_SCALE apart adds 0.63, and a pair of different stances (d >= 0.6) adds 0.9 or more.
-# The quadratic exponent keeps the slope at d = 0 flat, so estimator jitter on one repeated pose scores near zero.
-# Calibrated on the synthetic generators: see docs/metrics.md.
-DIVERSITY_SCALE = 0.3
+# Every default lives on MetricParams (the wire contract), with the reasoning beside it in models.py; these names are
+# kept for callers that want one number.
+DEFAULT_PARAMS = MetricParams()
+DIVERSITY_SCALE = DEFAULT_DIVERSITY_SCALE
+__all__ = [
+    "DEFAULT_CLUSTER_THRESHOLD",
+    "DEFAULT_PARAMS",
+    "DIVERSITY_SCALE",
+    "EmbeddedSet",
+    "average_linkage",
+    "cluster_ids",
+    "coverage",
+    "diversity",
+    "embed_set",
+    "keypoint_distance_matrix",
+    "mean_pairwise_distance",
+    "pair_diversity",
+    "pose_set_stats",
+    "project_2d",
+    "set_distances",
+    "shared_estimator",
+]
 
 STANCES: tuple[Stance, ...] = ("standing", "jumping", "crouching", "seated", "lying", "unknown")
 ARMS: tuple[Arms, ...] = ("up", "out", "down", "mixed", "unknown")
@@ -192,6 +199,20 @@ def project_2d(coords: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return out
 
 
+def cluster_ids(roots: Sequence[int] | np.ndarray) -> list[int]:
+    """:func:`average_linkage`'s per-item roots as compact cluster ids: 0 for the largest cluster, equal sizes ordered
+    by their first member's index."""
+    groups: dict[int, list[int]] = {}
+    for k, root in enumerate(roots):
+        groups.setdefault(int(root), []).append(k)
+    ordered = sorted(groups.values(), key=lambda g: (-len(g), g[0]))
+    out = [0] * len(roots)
+    for cid, members in enumerate(ordered):
+        for k in members:
+            out[k] = cid
+    return out
+
+
 def coverage(labels: Sequence[PoseLabels]) -> Coverage:
     """Counts per label, every label listed (zero or not)."""
     return Coverage(
@@ -215,6 +236,42 @@ class EmbeddedSet:
 
     def usable_arrays(self) -> tuple[np.ndarray, np.ndarray]:
         return stack([v for v in self.vectors if v is not None])
+
+
+def set_distances(coords: np.ndarray, mask: np.ndarray, params: MetricParams) -> np.ndarray:
+    """:func:`embedding.pairwise_distances` under *params*' shared-joint rules."""
+    return pairwise_distances(
+        coords,
+        mask,
+        min_shared_joints=params.min_shared_joints,
+        min_shared_limb_joints=params.min_shared_limb_joints,
+    )
+
+
+def keypoint_distance_matrix(poses: Sequence[np.ndarray], params: MetricParams | None = None) -> np.ndarray:
+    """The ``(n, n)`` mirror-invariant pose distance between ``(133, 3)`` keypoint arrays (float64).
+
+    A pose that cannot be embedded under *params* is NaN against everything, itself included; any other pair that
+    shares too few joints is NaN too. The pose library's default distance."""
+    params = params or DEFAULT_PARAMS
+    vectors = [
+        embed(np.asarray(p), min_joint_score=params.min_joint_score, min_usable_joints=params.min_usable_joints)
+        for p in poses
+    ]
+    usable = [i for i, v in enumerate(vectors) if v is not None]
+    out = np.full((len(vectors), len(vectors)), np.nan)
+    if usable:
+        coords, mask = stack([vectors[i] for i in usable])
+        out[np.ix_(usable, usable)] = set_distances(coords, mask, params)
+    return out
+
+
+def shared_estimator(results: Sequence[PoseResult]) -> EstimatorProvenance | None:
+    """The estimator every result names, when they all name the same one; else ``None`` (also for no results)."""
+    if not results:
+        return None
+    first = results[0].estimator
+    return first if all(r.estimator == first for r in results[1:]) else None
 
 
 def _sort_key(r: PoseResult) -> tuple:
@@ -255,7 +312,7 @@ def pose_set_stats(results: Sequence[PoseResult], *, params: MetricParams | None
     es = embed_set(results, params)
     usable = es.usable_index
     coords, mask = es.usable_arrays()
-    dist = pairwise_distances(coords, mask)
+    dist = set_distances(coords, mask, params)
 
     raw = average_linkage(dist, params.cluster_threshold)
     groups: dict[int, list[int]] = {}
@@ -289,7 +346,7 @@ def pose_set_stats(results: Sequence[PoseResult], *, params: MetricParams | None
     return PoseSetStats(
         count=len(es.images),
         usable=n_usable,
-        diversity=diversity(dist),
+        diversity=diversity(dist, params.diversity_scale),
         mean_pairwise_distance=mean_pairwise_distance(dist),
         cluster_count=len(clusters),
         largest_cluster_share=clusters[0].share if clusters else 0.0,
@@ -297,4 +354,5 @@ def pose_set_stats(results: Sequence[PoseResult], *, params: MetricParams | None
         coverage=coverage([es.labels[i] for i in usable]),
         items=items,
         params=params,
+        estimator=shared_estimator(results),
     )

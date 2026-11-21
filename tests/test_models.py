@@ -165,15 +165,36 @@ def test_set_stats() -> None:
 
 def test_comparison() -> None:
     cmp = PoseSetComparison(
-        output_count=1,
+        output_count=2,
+        matched_count=1,
         reference_count=4,
-        matches=[PoseMatch(image="o.png", nearest="t.jpg", distance=0.05, memorised=True)],
+        matches=[
+            PoseMatch(image="o.png", nearest="t.jpg", distance=0.05, memorised=True),
+            PoseMatch(image="u.png", memorised=False),
+        ],
         memorised_share=1.0,
         threshold=0.1,
         coverage_divergence=0.2,
         params=params(),
     )
     assert PoseSetComparison.model_validate_json(cmp.model_dump_json()) == cmp
+    with pytest.raises(ValidationError, match="matched_count"):
+        cmp.model_validate({**cmp.model_dump(), "matched_count": 2})
+    with pytest.raises(ValidationError, match="matches"):
+        cmp.model_validate({**cmp.model_dump(), "output_count": 3})
+    with pytest.raises(ValidationError, match="both"):
+        PoseMatch(image="o.png", nearest="t.jpg", memorised=False)
+    with pytest.raises(ValidationError, match="memorised"):
+        PoseMatch(image="o.png", memorised=True)
+
+
+def test_metric_params_default_to_the_suite_defaults() -> None:
+    p = MetricParams()
+    assert (p.min_joint_score, p.min_usable_joints, p.cluster_threshold) == (0.3, 8, 0.25)
+    assert (p.min_shared_joints, p.min_shared_limb_joints, p.diversity_scale) == (6, 2, 0.3)
+    assert MetricParams.model_validate({}) == p
+    with pytest.raises(ValidationError):
+        MetricParams(diversity_scale=0)
 
 
 def test_library_ids_are_unique() -> None:
@@ -197,8 +218,15 @@ def test_render_options_and_health_defaults() -> None:
     opts = RenderOptions()
     assert (opts.body, opts.hands, opts.face, opts.min_score) == (True, True, True, 0.3)
     assert opts.width is None and opts.height is None
-    h = Health(version="0.1.0", read_only=False, models={"yolox_m": True})
-    assert h.puppet_version == PUPPET_VERSION and h.free_vram_mb is None
+    assert (opts.fit, opts.primary_only, opts.stroke_scale, opts.margin) == ("contain", False, 1.0, 0.05)
+    assert RenderOptions(stroke_scale="auto").stroke_scale == "auto"
+    for bad in ({"stroke_scale": 0}, {"stroke_scale": "big"}, {"fit": "zoom"}, {"margin": 0.5}):
+        with pytest.raises(ValidationError):
+            RenderOptions.model_validate(bad)
+    h = Health(
+        version="0.1.0", read_only=False, models={"yolox_m": True}, pose_model="dwpose-l", detector_model="yolox_m"
+    )
+    assert h.puppet_version == PUPPET_VERSION and h.free_vram_mb is None and h.gpu_coordinator == "none"
 
 
 def test_sidecar_name() -> None:
@@ -208,7 +236,20 @@ def test_sidecar_name() -> None:
 
 def test_schema_covers_the_top_level_payloads() -> None:
     schema = json.loads(render_wire_schema())
-    for name in ("PoseResult", "PoseSetStats", "PoseSetComparison", "PoseLibrary", "RenderOptions", "Health"):
+    for name in (
+        "PoseResult",
+        "PoseSetStats",
+        "PoseSetComparison",
+        "PoseLibrary",
+        "RenderOptions",
+        "Health",
+        "ScanSummary",
+        "ScanRequest",
+        "StatsRequest",
+        "CompareRequest",
+        "RenderRequest",
+    ):
         assert name in schema["$defs"]
+    assert "puppet_version" in schema["$defs"]["ScanSummary"]["properties"]
     assert "puppet_version" in schema["$defs"]["PoseResult"]["properties"]
     assert "puppet_version" not in schema["$defs"]["PersonPose"]["properties"]

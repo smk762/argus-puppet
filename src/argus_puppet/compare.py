@@ -1,7 +1,7 @@
 """An output set's poses against a reference (training) set: :func:`compare_pose_sets`.
 
-For every usable output pose, the nearest usable reference pose under the mirror-invariant distance, flagged
-``memorised`` when it is closer than ``threshold``; and how far the two sets' label mixes have drifted apart
+For every output image, the nearest usable reference pose under the mirror-invariant distance (none when the output
+is unusable or comparable with no reference pose), flagged ``memorised`` when it is closer than ``threshold``; and how far the two sets' label mixes have drifted apart
 (Jensen-Shannon divergence of the coverage histograms). See ``docs/metrics.md``.
 
 A pose match is evidence of memorisation, not proof: two different people can strike the same pose, and a pose
@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 import numpy as np
 
 from argus_puppet.embedding import cross_distances
-from argus_puppet.metrics import ARMS, DEFAULT_PARAMS, FACINGS, STANCES, coverage, embed_set
+from argus_puppet.metrics import ARMS, DEFAULT_PARAMS, FACINGS, STANCES, coverage, embed_set, shared_estimator
 from argus_puppet.models import Coverage, MetricParams, PoseMatch, PoseResult, PoseSetComparison
 
 # Distance under which an output pose counts as a near-duplicate of a reference frame, in torso units. Re-estimating
@@ -79,12 +79,13 @@ def compare_pose_sets(
     threshold: float = DEFAULT_MEMORISATION_THRESHOLD,
     params: MetricParams | None = None,
 ) -> PoseSetComparison:
-    """Each usable output pose's nearest reference pose, the memorised share, and the coverage drift.
+    """Each output's nearest reference pose, the memorised share, and the coverage drift.
 
-    ``matches`` lists one entry per usable output image (sorted by image name) that has at least one comparable
-    reference pose; an output that is unusable, or shares too few joints with every reference pose, has no entry,
-    and ``output_count`` counts only the outputs that were matched. Ties for the nearest reference go to the
-    alphabetically first reference image. ``memorised_share`` is over the matches (0 when there are none).
+    ``matches`` lists one entry per output image, sorted by image name. An output that is unusable, or shares too few
+    joints with every usable reference pose, has ``nearest`` and ``distance`` null and is not memorised.
+    ``output_count`` counts every output image, ``matched_count`` those with a nearest reference, and
+    ``memorised_share`` is over the matched ones (0 when none matched). Ties for the nearest reference go to the
+    alphabetically first reference image. *params* (embedding and shared-joint rules) default to the suite's.
     """
     params = params or DEFAULT_PARAMS
     if threshold < 0:
@@ -94,33 +95,44 @@ def compare_pose_sets(
     out_idx, ref_idx = out_set.usable_index, ref_set.usable_index
     oc, om = out_set.usable_arrays()
     rc, rm = ref_set.usable_arrays()
-    dist = cross_distances(oc, om, rc, rm)
+    dist = cross_distances(
+        oc,
+        om,
+        rc,
+        rm,
+        min_shared_joints=params.min_shared_joints,
+        min_shared_limb_joints=params.min_shared_limb_joints,
+    )
+    row_of = {i: row for row, i in enumerate(out_idx)}
 
     matches: list[PoseMatch] = []
-    for row, i in enumerate(out_idx):
-        d = dist[row] if len(ref_idx) else np.zeros(0)
+    for i, image in enumerate(out_set.images):
+        row = row_of.get(i)
+        d = dist[row] if row is not None and len(ref_idx) else np.zeros(0)
         finite = np.isfinite(d)
         if not finite.any():
+            matches.append(PoseMatch(image=image, memorised=False))
             continue
         j = int(np.argmin(np.where(finite, d, np.inf)))  # first (alphabetical) on ties
         dj = float(d[j])
         matches.append(
-            PoseMatch(
-                image=out_set.images[i], nearest=ref_set.images[ref_idx[j]], distance=dj, memorised=dj < threshold
-            )
+            PoseMatch(image=image, nearest=ref_set.images[ref_idx[j]], distance=dj, memorised=dj < threshold)
         )
 
     out_cov = coverage([out_set.labels[i] for i in out_idx])
     ref_cov = coverage([ref_set.labels[i] for i in ref_idx])
+    matched = sum(1 for m in matches if m.nearest is not None)
     memorised = sum(1 for m in matches if m.memorised)
     return PoseSetComparison(
         output_count=len(matches),
+        matched_count=matched,
         reference_count=len(ref_idx),
         matches=matches,
-        memorised_share=memorised / len(matches) if matches else 0.0,
+        memorised_share=memorised / matched if matched else 0.0,
         threshold=threshold,
         coverage_divergence=coverage_divergence(out_cov, ref_cov),
         output_coverage=out_cov,
         reference_coverage=ref_cov,
         params=params,
+        estimator=shared_estimator([*outputs, *reference]),
     )

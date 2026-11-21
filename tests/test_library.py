@@ -8,12 +8,14 @@ import numpy as np
 import pytest
 from synthetic_poses import STANDING_BODY, figure, result
 
+from argus_puppet.age import AgeUnavailable
 from argus_puppet.library import (
-    FALLBACK_DEDUPE_THRESHOLD,
+    DEFAULT_DEDUPE_THRESHOLD,
+    AgeGate,
     build_library,
+    default_distance_matrix,
     entry_from_result,
     entry_id,
-    fallback_distance_matrix,
     load_library,
     render_entries,
     sample,
@@ -90,28 +92,28 @@ def test_unusable_results_are_skipped() -> None:
     assert entry_from_result(result([figure(score=0.1)]), min_body_score=0.05) is not None
 
 
-# ── the stand-in distance ────────────────────────────────────────────────────────────────────────────────────────
+# ── the default distance ─────────────────────────────────────────────────────────────────────────────────────────
 
 
-def test_fallback_distance_is_translation_scale_and_mirror_invariant() -> None:
+def test_default_distance_is_the_real_metric_translation_scale_and_mirror_invariant() -> None:
     kp = figure(body=lean())
     mirrored = flip_horizontal(kp, 100)
-    d = fallback_distance_matrix([kp, figure(body=lean(), scale=3, dx=40), mirrored, figure(arms_up=True)])
-    assert d[0, 1] == pytest.approx(0.0, abs=1e-9)
-    assert d[0, 2] == pytest.approx(0.0, abs=1e-9)
+    d = default_distance_matrix([kp, figure(body=lean(), scale=3, dx=40), mirrored, figure(arms_up=True)])
+    assert d[0, 1] == pytest.approx(0.0, abs=1e-6)
+    assert d[0, 2] == pytest.approx(0.0, abs=1e-6)
     assert d[0, 3] > 0.3
     assert np.allclose(d, d.T, equal_nan=True) and np.all(np.diag(d) == 0)
 
 
-def test_fallback_distance_is_nan_when_a_pose_cannot_be_normalised() -> None:
+def test_default_distance_is_nan_when_a_pose_cannot_be_embedded() -> None:
     no_hips = figure()
     no_hips[11:13, 2] = 0.0
     few = figure()
     few[:17, 2] = 0.0
-    few[[5, 11, 12], 2] = 0.9  # normalisable but only three joints
-    d = fallback_distance_matrix([figure(), no_hips, few])
+    few[[5, 11, 12], 2] = 0.9  # anchored but only three joints
+    d = default_distance_matrix([figure(), no_hips, few])
     assert np.isnan(d[0, 1]) and np.isnan(d[1, 1]) and np.isnan(d[0, 2])
-    assert fallback_distance_matrix([]).shape == (0, 0)
+    assert default_distance_matrix([]).shape == (0, 0)
 
 
 # ── building ─────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -130,18 +132,33 @@ def test_build_skips_unusable_and_repeated_images() -> None:
     assert lib.estimator == good.estimator
 
 
-def test_build_dedupes_to_one_per_pose() -> None:
-    build = build_library(results_with_duplicates(), dedupe_threshold=FALLBACK_DEDUPE_THRESHOLD)
+def test_build_dedupes_to_one_per_pose_by_default() -> None:
+    build = build_library(results_with_duplicates())
     names = sorted(e.source_image.split("/")[0] for e in build.library.entries)
     assert names == sorted(POSES)
     assert build.near_duplicates == 12 and len(build.dropped) == 12
+    assert DEFAULT_DEDUPE_THRESHOLD == 0.08
+
+
+def test_build_labels_and_clusters_with_the_real_rules_by_default() -> None:
+    lib = build_library(results_with_duplicates(), dedupe_threshold=None).library
+    by_pose = {e.source_image.split("/")[0]: e for e in lib.entries}
+    assert by_pose["stand"].labels.stance == "standing" and by_pose["arms_up"].labels.arms == "up"
+    assert all(e.cluster is not None for e in lib.entries)
+    # four copies of each pose share one cluster; arms-up (>= 0.35 from every other pose) is a cluster of its own,
+    # while this mild squat sits 0.18 from standing, under the 0.25 cut, and joins it
+    clusters = {name: {e.cluster for e in lib.entries if e.source_image.startswith(name + "/")} for name in POSES}
+    assert all(len(c) == 1 for c in clusters.values())
+    others = set().union(*(c for name, c in clusters.items() if name != "arms_up"))
+    assert not clusters["arms_up"] & others and len(others) == 2
+    unlabelled = build_library(results_with_duplicates()[:1], labeler=None, clusterer=None).library.entries[0]
+    assert unlabelled.labels == PoseLabels() and unlabelled.cluster is None
 
 
 def test_build_dedupe_keeps_the_best_scored_copy() -> None:
     faint, strong = figure(score=0.5), figure(score=0.95, dx=1)
     build = build_library(
         [result([faint], image="faint.png"), result([strong], image="strong.png")],
-        dedupe_threshold=FALLBACK_DEDUPE_THRESHOLD,
     )
     assert [e.source_image for e in build.library.entries] == ["strong.png"]
 
@@ -152,13 +169,13 @@ def test_build_clusters_and_samples_with_injected_callables() -> None:
     def distance(poses: list[np.ndarray]) -> np.ndarray:
         seen["n"] = len(poses)
         assert all(p.shape == (133, 3) for p in poses)
-        return fallback_distance_matrix(poses)
+        return default_distance_matrix(poses)
 
     def clusterer(d: np.ndarray) -> list[int | None]:
         return [i // 4 for i in range(len(d))]  # inputs come pose by pose, four copies each
 
     rs = results_with_duplicates()
-    build = build_library(rs, distance_matrix=distance, clusterer=clusterer, max_entries=4)
+    build = build_library(rs, distance_matrix=distance, clusterer=clusterer, max_entries=4, dedupe_threshold=None)
     lib = build.library
     assert seen["n"] == 16
     assert len(lib.entries) == 4 and build.sampled_out == 12
@@ -180,7 +197,9 @@ def test_build_without_distance_steps_never_computes_one() -> None:
     def boom(poses: list[np.ndarray]) -> np.ndarray:
         raise AssertionError("not needed")
 
-    assert len(build_library(results_with_duplicates(), distance_matrix=boom).library.entries) == 16
+    rs = results_with_duplicates()
+    built = build_library(rs, distance_matrix=boom, dedupe_threshold=None, clusterer=None)
+    assert len(built.library.entries) == 16
 
 
 # ── persistence ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -188,6 +207,7 @@ def test_build_without_distance_steps_never_computes_one() -> None:
 
 def test_save_and_load_round_trip(tmp_path: Path) -> None:
     lib = build_library(results_with_duplicates()[:3], created_from="test").library
+    assert lib.entries and lib.age_checked is False
     path = save_library(lib, tmp_path / "lib.json")
     assert load_library(path) == lib
     text = path.read_text()
@@ -219,7 +239,7 @@ def library_with_labels() -> PoseLibrary:
     def labeler(kp: np.ndarray) -> PoseLabels:
         return PoseLabels(arms="up" if kp[9, 1] < kp[0, 1] else "down", stance="standing")
 
-    return build_library(results_with_duplicates(), labeler=labeler).library
+    return build_library(results_with_duplicates(), labeler=labeler, dedupe_threshold=None, clusterer=None).library
 
 
 def test_sample_returns_diverse_poses() -> None:
@@ -264,3 +284,86 @@ def test_render_entries_refits_each_skeleton() -> None:
         assert ys.min() >= 38 - 5 and ys.max() <= 346 + 5  # inside the 10 % margin (dots overhang by a radius)
         assert xs.min() >= 25 - 5 and xs.max() <= 231 + 5
         assert (ys.max() - ys.min() > 280) or (xs.max() - xs.min() > 190)  # fills one dimension
+
+
+# ── the age fail-safe ────────────────────────────────────────────────────────────────────────────────────────────
+
+
+class FakeAges:
+    """Answers per image bytes: a number (the youngest estimate), None (nobody), or an exception."""
+
+    def __init__(self, answers: dict[bytes, object]) -> None:
+        self.answers = answers
+        self.calls: list[bytes] = []
+
+    def min_age(self, data: bytes) -> float | None:
+        self.calls.append(data)
+        answer = self.answers[data]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer  # type: ignore[return-value]
+
+
+def _aged(name: str, pose: str, data: bytes):
+    r = result([POSES[pose]()], image=name, width=200, height=300)
+    return r.model_copy(update={"image_sha256": __import__("hashlib").sha256(data).hexdigest()})
+
+
+def test_the_age_check_keeps_out_minors_and_fails_closed() -> None:
+    images = {
+        "adult.png": (b"adult", 34.0),
+        "teen.png": (b"teen", 16.5),
+        "down.png": (b"down", AgeUnavailable("the age check could not be reached")),
+        "nobody.png": (b"nobody", None),
+        "edge.png": (b"edge", 18.0),
+    }
+    poses = dict(zip(images, ["stand", "arms_up", "squat", "lean", "arms_up"], strict=True))
+    results = [_aged(name, poses[name], data) for name, (data, _) in images.items()]
+    results.append(_aged("moved.png", "squat", b"original"))  # the file on disk changed since posing
+    store = {name: data for name, (data, _) in images.items()} | {"moved.png": b"edited"}
+    ages = FakeAges({data: age for data, age in images.values()})
+
+    def load(r) -> bytes:
+        return store[r.image]
+
+    build = build_library(results, age_gate=AgeGate(ages, load), dedupe_threshold=None)
+    kept = sorted(e.source_image for e in build.library.entries)
+    assert kept == ["adult.png", "edge.png"]
+    assert (build.age_passed, build.under_age, build.age_unchecked, build.age_checked) == (2, 1, 3, 3)
+    why = dict(build.age_excluded)
+    assert why["teen.png"] == "under 18"
+    assert why["down.png"].startswith("unchecked") and "reached" in why["down.png"]
+    assert why["nobody.png"] == "unchecked: no face or body to estimate"
+    assert "SHA-256" in why["moved.png"]
+    assert b"edited" not in ages.calls  # a mismatched image is never sent
+    assert build.library.age_checked is True
+
+
+def test_no_library_entry_comes_from_a_frame_that_failed_the_age_check() -> None:
+    """CLAUDE.md "Must never happen": with the check on, a frame that read under 18 or could not be checked never
+    becomes an entry, whatever the later steps (dedupe, clustering, the cap) do."""
+    rng = np.random.default_rng(5)
+    results, store, answers = [], {}, {}
+    for k in range(24):
+        data = f"img{k}".encode()
+        name = f"f{k:02d}.png"
+        results.append(_aged(name, list(POSES)[k % 4], data))
+        store[name] = data
+        answers[data] = [40.0, 12.0, None, AgeUnavailable("x")][int(rng.integers(4))]
+    bad = {r.image for r in results if not isinstance(answers[store[r.image]], float) or answers[store[r.image]] < 18}
+
+    def load(r) -> bytes:
+        if r.image == "f00.png":
+            raise FileNotFoundError(r.image)
+        return store[r.image]
+
+    for kwargs in ({}, {"dedupe_threshold": None}, {"max_entries": 2}):
+        build = build_library(results, age_gate=AgeGate(FakeAges(answers), load), **kwargs)
+        sources = {e.source_image for e in build.library.entries}
+        assert not sources & (bad | {"f00.png"})
+
+
+def test_without_the_age_check_nothing_is_sent() -> None:
+    ages = FakeAges({})
+    build = build_library([_aged("a.png", "stand", b"a")])
+    assert ages.calls == [] and build.library.age_checked is False and build.age_checked == 0

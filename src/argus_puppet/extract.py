@@ -1,12 +1,13 @@
 """The library API: pose one image, or a folder of images into ``<stem>.pose.json`` sidecars.
 
 * :func:`pose_image` takes bytes or a path and returns a :class:`~argus_puppet.models.PoseResult`. It writes nothing.
-* :func:`pose_folder` walks a folder (or one file) in sorted order and yields one :class:`ImageOutcome` per image,
+* :func:`pose_folder` walks a folder (or one file) in sorted order and yields one
+  :class:`~argus_puppet.models.ImageOutcome` per image,
   writing each sidecar atomically (temp file + ``os.replace``, sorted keys). An existing sidecar is kept unless
   ``overwrite``; two images sharing a stem (``a.jpg`` + ``a.png``) would share a sidecar, so only the first in sorted
   order is posed and the other is skipped (``sidecar_collision``). An unreadable image is reported, never fatal; a
   model that cannot run or a GPU lease that is not granted stops the run (raised).
-* :func:`scan` runs :func:`pose_folder` to the end and returns a :class:`ScanSummary`.
+* :func:`scan` runs :func:`pose_folder` to the end and returns a :class:`~argus_puppet.models.ScanSummary`.
 
 Images are decoded through :func:`argus_cortex.limits.open_image` (the pixel and byte caps from settings), with
 EXIF orientation applied: keypoints are in the oriented image's pixels.
@@ -19,11 +20,9 @@ import hashlib
 import json
 import os
 import tempfile
-from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 import structlog
 from argus_cortex.fs import is_within
@@ -31,66 +30,37 @@ from argus_cortex.gpu import GpuCoordinator
 from argus_cortex.gpu_wire import PriorityClass
 from argus_cortex.limits import BadInput, TooLarge, open_image
 from PIL import Image, ImageOps
-from pydantic import BaseModel, Field
 
 from argus_puppet import estimator as estimator_mod
 from argus_puppet import gpu
 from argus_puppet.config import Settings
-from argus_puppet.models import PoseResult, sidecar_path
+from argus_puppet.models import SKIP_MAX_IMAGES, ImageOutcome, PoseResult, ScanSummary, sidecar_path
 from argus_puppet.primary import BoxXYWH, assign_primary
 
 log = structlog.get_logger(__name__)
 
 IMAGE_SUFFIXES: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 
-Status = Literal["written", "skipped", "failed"]
-# Why an image was skipped or failed.
+__all__ = [
+    "IMAGE_SUFFIXES",
+    "ImageOutcome",
+    "ScanSummary",
+    "build_result",
+    "decode",
+    "list_images",
+    "pose_folder",
+    "pose_image",
+    "scan",
+    "write_sidecar",
+]
+
+# Why an image was skipped or failed (ImageOutcome.reason).
 SKIP_EXISTS = "exists"
 SKIP_COLLISION = "sidecar_collision"
-SKIP_LIMIT = "max_images"
+SKIP_LIMIT = SKIP_MAX_IMAGES
 SKIP_OUTSIDE = "outside_root"
 FAIL_UNREADABLE = "unreadable"
 FAIL_TOO_LARGE = "too_large"
-
-
-class ImageOutcome(BaseModel):
-    """What happened to one image of a folder run."""
-
-    image: str = Field(..., description="Path relative to the scanned root ('/' separators).")
-    status: Status
-    reason: str | None = Field(None, description="Why it was skipped or failed.")
-    detail: str | None = Field(None, description="The error, for a failed image.")
-    people: int = Field(0, ge=0, description="People found (0 unless written).")
-    sidecar: str | None = Field(None, description="The sidecar written, relative to the scanned root.")
-
-
-class ScanSummary(BaseModel):
-    """A folder run's totals and per-image outcomes (the CLI's ``--json`` and ``POST /pose/scan``)."""
-
-    root: str = Field(..., description="The folder scanned, as the caller named it.")
-    images: int = Field(0, ge=0, description="Images found.")
-    written: int = Field(0, ge=0, description="Sidecars written.")
-    people: int = Field(0, ge=0, description="People found across the written images.")
-    skipped: dict[str, int] = Field(default_factory=dict, description="Images skipped, by reason.")
-    failed: dict[str, int] = Field(default_factory=dict, description="Images that failed, by reason.")
-    truncated: bool = Field(False, description="Whether the per-run image cap stopped the run early.")
-    outcomes: list[ImageOutcome] = Field(default_factory=list)
-
-    @classmethod
-    def of(cls, root: str, outcomes: Iterable[ImageOutcome]) -> ScanSummary:
-        items = list(outcomes)
-        skipped = Counter(o.reason or "" for o in items if o.status == "skipped")
-        failed = Counter(o.reason or "" for o in items if o.status == "failed")
-        return cls(
-            root=root,
-            images=len(items),
-            written=sum(o.status == "written" for o in items),
-            people=sum(o.people for o in items),
-            skipped=dict(sorted(skipped.items())),
-            failed=dict(sorted(failed.items())),
-            truncated=skipped.get(SKIP_LIMIT, 0) > 0,
-            outcomes=items,
-        )
 
 
 # ── one image ────────────────────────────────────────────────────────────────────────────────────────────────────

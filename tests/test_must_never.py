@@ -80,6 +80,14 @@ def test_no_image_is_hidden_in_a_base64_literal() -> None:
 
 EVIL = {"origin": "https://evil.example", "sec-fetch-site": "cross-site"}
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+# Every unsafe route the app has today: a new one is walked automatically, a missing one fails the walk.
+EXPECTED_UNSAFE = (
+    ("POST", "/pose"),
+    ("POST", "/pose/scan"),
+    ("POST", "/stats"),
+    ("POST", "/compare"),
+    ("POST", "/render"),
+)
 
 
 def _app(tmp_path: Path, **changes):
@@ -103,7 +111,7 @@ def test_every_unsafe_route_refuses_another_site(tmp_path) -> None:
     boundary: a multipart POST needs no preflight)."""
     app, root = _app(tmp_path)
     routes = _unsafe_routes(app)
-    assert ("POST", "/pose") in routes and ("POST", "/pose/scan") in routes  # the table was walked
+    assert set(EXPECTED_UNSAFE) <= set(routes) and len(routes) >= len(EXPECTED_UNSAFE)  # the table was walked
     with TestClient(app) as client:
         for method, path in routes:
             reply = client.request(method, path, headers=EVIL, json={"path": "set"})
@@ -114,7 +122,7 @@ def test_every_unsafe_route_refuses_another_site(tmp_path) -> None:
 def test_read_only_mode_refuses_every_unsafe_route(tmp_path) -> None:
     app, root = _app(tmp_path, read_only=True)
     routes = _unsafe_routes(app)
-    assert routes
+    assert set(EXPECTED_UNSAFE) <= set(routes)
     with TestClient(app) as client:
         for method, path in routes:
             reply = client.request(method, path, json={"path": "set"})
@@ -135,6 +143,11 @@ def test_a_scan_path_escaping_the_data_root_is_refused(tmp_path) -> None:
             reply = client.post("/pose/scan", json={"path": path})
             assert reply.status_code == 400, f"{path!r} answered {reply.status_code}"
     assert not (outside / "b.pose.json").exists()
+    with TestClient(app) as client:  # the set routes read sidecars under the same fence
+        for path in ("../outside", str(outside), "set/../../outside", "escape"):
+            assert client.post("/stats", json={"path": path}).status_code == 400, path
+            reply = client.post("/compare", json={"outputs": {"path": "set"}, "reference": {"path": path}})
+            assert reply.status_code == 400, path
     unrooted = create_app(dataclasses.replace(app.state.puppet.settings, data_root=None), estimator=FakeEstimator())
     with TestClient(unrooted) as client:
         assert client.post("/pose/scan", json={"path": "set"}).status_code == 409

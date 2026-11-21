@@ -4,12 +4,17 @@ A :class:`~argus_puppet.models.PoseLibrary` holds one entry per source image (it
 image's name and SHA-256 as provenance. This module builds one from :class:`~argus_puppet.models.PoseResult` objects,
 saves and loads it as JSON, samples *N* diverse poses from it, and renders a sampled batch as control images.
 
-**Pose distance is injected.** The suite's pose distance (mirror-invariant, over ``(133, 3)`` keypoints) lives in
-the metrics module; pass it as ``distance_matrix``: a callable taking a list of ``(133, 3)`` arrays and returning
-their ``(n, n)`` pairwise distance matrix (NaN for pairs it cannot compare). Optional ``labeler`` (one ``(133, 3)``
-array to :class:`~argus_puppet.models.PoseLabels`) and ``clusterer`` (the ``(n, n)`` distance matrix to one cluster
-id per pose, ``None`` for unclustered) fill each entry's labels and cluster. Without them,
-:func:`fallback_distance_matrix` is used: a deliberately simple **stand-in** so the library works on its own.
+**The pose distance** is the suite's mirror-invariant distance (:func:`metrics.keypoint_distance_matrix`, in torso
+units; see ``docs/pose-vector.md``), entries are labelled with :func:`labels.pose_labels`, and clustered by
+:func:`metrics.average_linkage` at the metrics' cluster threshold. Each is a parameter: ``distance_matrix`` (a list
+of ``(133, 3)`` arrays to their ``(n, n)`` distance matrix, NaN for pairs it cannot compare), ``labeler`` (one array
+to :class:`~argus_puppet.models.PoseLabels`) and ``clusterer`` (the matrix to one cluster id per pose); pass
+``None`` as the labeler or clusterer to skip that step.
+
+**The age fail-safe** (``age_gate``): with real-person sources, every candidate image is sent to the suite's age
+check (:mod:`argus_puppet.age`) and kept only when every face and body in it reads 18 or over. It fails closed: an
+image the check cannot vouch for (service down, an unreadable answer, nobody to estimate, an image that cannot be
+read or no longer matches its pose's SHA-256) is excluded too.
 """
 
 from __future__ import annotations
@@ -27,9 +32,18 @@ import numpy as np
 import structlog
 from PIL import Image
 
+from argus_puppet.age import ADULT_AGE, AgeEstimator, AgeUnavailable
+from argus_puppet.compare import DEFAULT_MEMORISATION_THRESHOLD
+from argus_puppet.labels import pose_labels
+from argus_puppet.metrics import (
+    DEFAULT_PARAMS,
+    average_linkage,
+    cluster_ids,
+    keypoint_distance_matrix,
+    shared_estimator,
+)
 from argus_puppet.models import (
     Arms,
-    EstimatorProvenance,
     Facing,
     PoseLabels,
     PoseLibrary,
@@ -40,19 +54,20 @@ from argus_puppet.models import (
 )
 from argus_puppet.render import render_pose
 from argus_puppet.sampling import deduplicate, farthest_point_sample
-from argus_puppet.skeleton import BODY, FLIP_PERMUTATION, L_HIP, L_SHOULDER, R_HIP, R_SHOULDER
 
 __all__ = [
+    "DEFAULT_DEDUPE_THRESHOLD",
     "DEFAULT_MIN_BODY_SCORE",
-    "FALLBACK_DEDUPE_THRESHOLD",
+    "AgeGate",
     "Clusterer",
     "DistanceMatrixFn",
     "LibraryBuild",
     "Labeler",
     "build_library",
+    "default_clusterer",
+    "default_distance_matrix",
     "entry_from_result",
     "entry_id",
-    "fallback_distance_matrix",
     "load_library",
     "render_entries",
     "sample",
@@ -67,13 +82,23 @@ Clusterer = Callable[[np.ndarray], Sequence[int | None]]
 
 # A primary person whose mean body-joint score is below this is not a usable pose.
 DEFAULT_MIN_BODY_SCORE = 0.3
-# A joint counts in the fallback distance at or above this score.
-FALLBACK_MIN_JOINT_SCORE = 0.3
-# The fallback distance needs this many joints confident in both poses; fewer and the pair is NaN.
-FALLBACK_MIN_COMMON_JOINTS = 6
-# A dedupe threshold that suits the fallback distance (mean joint offset in torso lengths). The injected distance
-# has its own scale: pick its threshold from its docs, not this.
-FALLBACK_DEDUPE_THRESHOLD = 0.1
+# Poses closer than this collapse to the best-scored one. The library's "same pose" is the comparison's
+# "memorised" (compare.DEFAULT_MEMORISATION_THRESHOLD), so the suite has one definition: re-estimating one pose sits
+# at a median 0.04 and a 99th percentile 0.09 on the synthetic generators, the two closest *distinct* presets
+# (standing vs hands on hips) 0.12 apart. 0.08 removes nearly every re-estimated copy (a burst of frames, the same
+# photo at two sizes) and stays a third below the closest distinct pair, so no real pose variety is thrown away;
+# the rare copy that survives just costs one extra entry. See docs/conditioning.md.
+DEFAULT_DEDUPE_THRESHOLD = DEFAULT_MEMORISATION_THRESHOLD
+
+
+def default_distance_matrix(poses: Sequence[np.ndarray]) -> np.ndarray:
+    """The suite's mirror-invariant pose distance under the default metric params (NaN where not comparable)."""
+    return keypoint_distance_matrix(poses, DEFAULT_PARAMS)
+
+
+def default_clusterer(dist: np.ndarray) -> list[int | None]:
+    """Average-linkage clusters cut at the metrics' default threshold, as compact ids (0 for the largest)."""
+    return list(cluster_ids(average_linkage(np.asarray(dist), DEFAULT_PARAMS.cluster_threshold)))
 
 
 # ── entries ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -107,61 +132,16 @@ def entry_from_result(
     )
 
 
-# ── the stand-in distance ────────────────────────────────────────────────────────────────────────────────────────
-
-_BODY_FLIP = FLIP_PERMUTATION[BODY]  # body joints map onto body joints under a flip
-
-
-def _normalise_body(kp: np.ndarray, min_score: float) -> tuple[np.ndarray, np.ndarray] | None:
-    """Body-17 coordinates centred on the hips and scaled by torso length, with the confident-joint mask; ``None``
-    when no hip or no shoulder is confident, or the torso has no length."""
-    body = np.asarray(kp, dtype=np.float64)[BODY]
-    ok = np.isfinite(body[:, :2]).all(axis=1) & (np.nan_to_num(body[:, 2], nan=0.0) >= min_score)
-    hips, shoulders = [j for j in (L_HIP, R_HIP) if ok[j]], [j for j in (L_SHOULDER, R_SHOULDER) if ok[j]]
-    if not hips or not shoulders:
-        return None
-    hip_c, sh_c = body[hips, :2].mean(axis=0), body[shoulders, :2].mean(axis=0)
-    scale = float(np.linalg.norm(sh_c - hip_c))
-    if not np.isfinite(scale) or scale < 1e-6:
-        return None
-    xy = np.where(ok[:, None], (body[:, :2] - hip_c) / scale, 0.0)
-    return xy, ok
-
-
-def fallback_distance_matrix(poses: Sequence[np.ndarray]) -> np.ndarray:
-    """**Stand-in** pose distance: mean body-joint offset, in torso lengths, after hip-centring.
-
-    Each pose's 17 body joints are centred on the mean of its confident hips and divided by its hip-to-shoulder
-    distance; the distance between two poses is the mean Euclidean offset over the joints confident (score >= 0.3)
-    in both, minimised over mirroring one of them (so a pose and its mirror image are the same pose). NaN when a pose
-    cannot be normalised or the pair shares fewer than 6 confident joints. Simple, scale- and translation-invariant
-    but not rotation-invariant; the suite's real metric replaces it.
-    """
-    norm = [_normalise_body(p, FALLBACK_MIN_JOINT_SCORE) for p in poses]
-    n = len(norm)
-    d = np.full((n, n), np.nan)
-    for i in range(n):
-        if norm[i] is None:
-            continue
-        d[i, i] = 0.0
-        a, ma = norm[i]  # type: ignore[misc]
-        for j in range(i + 1, n):
-            if norm[j] is None:
-                continue
-            b, mb = norm[j]  # type: ignore[misc]
-            fb = b[_BODY_FLIP] * np.array([-1.0, 1.0])
-            fmb = mb[_BODY_FLIP]
-            best = np.nan
-            for other, mask in ((b, mb), (fb, fmb)):
-                common = ma & mask
-                if common.sum() >= FALLBACK_MIN_COMMON_JOINTS:
-                    v = float(np.linalg.norm(a[common] - other[common], axis=1).mean())
-                    best = v if np.isnan(best) else min(best, v)
-            d[i, j] = d[j, i] = best
-    return d
-
-
 # ── building ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class AgeGate:
+    """The age fail-safe for :func:`build_library`: *estimator* reads an image, *load_image* gives the bytes of the
+    image a result came from (raising ``OSError`` or ``LookupError`` when it cannot)."""
+
+    estimator: AgeEstimator
+    load_image: Callable[[PoseResult], bytes]
 
 
 @dataclass
@@ -173,16 +153,37 @@ class LibraryBuild:
     no_person: int = 0  # no primary person
     low_score: int = 0  # primary person below min_body_score
     duplicate_ids: int = 0  # the same image (and pose) seen twice
+    under_age: int = 0  # age check on: a face or body read under 18
+    age_unchecked: int = 0  # age check on: the check could not vouch for the image (fails closed)
+    age_passed: int = 0  # age check on: every face and body read 18 or over
     near_duplicates: int = 0  # dropped by the distance dedupe
     sampled_out: int = 0  # dropped by max_entries
     dropped: list[str] = field(default_factory=list)  # source images dropped as near-duplicates or sampled out
+    age_excluded: list[tuple[str, str]] = field(default_factory=list)  # (source image, why) the age check kept out
+
+    @property
+    def age_checked(self) -> int:
+        """Images the age check gave a verdict on (passed or under age)."""
+        return self.age_passed + self.under_age
 
 
-def _shared_estimator(results: list[PoseResult]) -> EstimatorProvenance | None:
-    if not results:
-        return None
-    first = results[0].estimator
-    return first if all(r.estimator == first for r in results[1:]) else None
+def _age_verdict(gate: AgeGate, result: PoseResult) -> str | None:
+    """``None`` when the image passes, else why it is kept out ('under 18' or why it could not be checked)."""
+    try:
+        data = gate.load_image(result)
+    except (OSError, LookupError) as exc:
+        return f"unchecked: the image could not be read ({exc})"
+    if hashlib.sha256(data).hexdigest() != result.image_sha256:
+        return "unchecked: the image no longer matches its pose's SHA-256"
+    try:
+        youngest = gate.estimator.min_age(data)
+    except AgeUnavailable as exc:
+        return f"unchecked: {exc}"
+    if youngest is None:
+        return "unchecked: no face or body to estimate"
+    if youngest < ADULT_AGE:
+        return "under 18"
+    return None
 
 
 def build_library(
@@ -191,19 +192,22 @@ def build_library(
     min_body_score: float = DEFAULT_MIN_BODY_SCORE,
     created_from: str = "",
     distance_matrix: DistanceMatrixFn | None = None,
-    labeler: Labeler | None = None,
-    clusterer: Clusterer | None = None,
-    dedupe_threshold: float | None = None,
+    labeler: Labeler | None = pose_labels,
+    clusterer: Clusterer | None = default_clusterer,
+    dedupe_threshold: float | None = DEFAULT_DEDUPE_THRESHOLD,
     max_entries: int | None = None,
     seed: int | None = None,
+    age_gate: AgeGate | None = None,
 ) -> LibraryBuild:
-    """Build a library from pose results: one entry per image's usable primary person.
+    """Build a library from pose results: one entry per image's usable primary person, labelled by *labeler*.
 
-    Then, in order: entries with the same id (same image, same pose) collapse to the first; with
-    *dedupe_threshold*, poses closer than it to a better-scored kept pose are dropped (best mean body score wins);
-    with *clusterer*, each entry gets a cluster id; with *max_entries*, a diverse subset of that size is kept by
-    farthest-point sampling, stratified by cluster (deterministic, or seeded with *seed*). Entries keep input order.
-    *distance_matrix* defaults to :func:`fallback_distance_matrix`; it is only computed when a step needs it.
+    Then, in order: entries with the same id (same image, same pose) collapse to the first; with *age_gate*, every
+    remaining image goes through the age check and is kept only when it passes (failing closed, see the module
+    docstring); with *dedupe_threshold*, poses closer than it to a better-scored kept pose are dropped (best mean
+    body score wins); with *clusterer*, each entry gets a cluster id; with *max_entries*, a diverse subset of that
+    size is kept by farthest-point sampling, stratified by cluster (deterministic, or seeded with *seed*). Entries
+    keep input order. *distance_matrix* defaults to :func:`default_distance_matrix`; it is only computed when a step
+    needs it. ``library.age_checked`` records whether the age check ran.
     """
     pairs: list[tuple[PoseResult, PoseLibraryEntry]] = []
     seen: set[str] = set()
@@ -223,13 +227,23 @@ def build_library(
             build.duplicate_ids += 1
             continue
         seen.add(entry.id)
+        if age_gate is not None:
+            why = _age_verdict(age_gate, result)
+            if why is not None:
+                if why == "under 18":
+                    build.under_age += 1
+                else:
+                    build.age_unchecked += 1
+                build.age_excluded.append((result.image, why))
+                continue
+            build.age_passed += 1
         pairs.append((result, entry))
 
     entries = [e for _, e in pairs]
     quality = [r.primary_person.part_scores.body for r, _ in pairs]  # type: ignore[union-attr]
     needs_distance = dedupe_threshold is not None or clusterer is not None or max_entries is not None
     if entries and needs_distance:
-        dist_fn = distance_matrix or fallback_distance_matrix
+        dist_fn = distance_matrix or default_distance_matrix
         d = _checked_matrix(dist_fn([e.keypoints_array() for e in entries]), len(entries))
         keep = list(range(len(entries)))
         if dedupe_threshold is not None:
@@ -250,7 +264,12 @@ def build_library(
             build.dropped += [e.source_image for i, e in enumerate(entries) if i not in picked]
             entries = [e for i, e in enumerate(entries) if i in picked]
 
-    build.library = PoseLibrary(created_from=created_from, estimator=_shared_estimator(all_results), entries=entries)
+    build.library = PoseLibrary(
+        created_from=created_from,
+        estimator=shared_estimator(all_results),
+        entries=entries,
+        age_checked=age_gate is not None,
+    )
     log.info(
         "pose_library.built",
         considered=build.considered,
@@ -258,6 +277,9 @@ def build_library(
         no_person=build.no_person,
         low_score=build.low_score,
         duplicate_ids=build.duplicate_ids,
+        age_check=age_gate is not None,
+        under_age=build.under_age,
+        age_unchecked=build.age_unchecked,
         near_duplicates=build.near_duplicates,
         sampled_out=build.sampled_out,
     )
@@ -317,7 +339,7 @@ def sample(
     entries, every cluster is sampled once before any twice. Unseeded, the first pick is the most central pose and
     the result is deterministic; with *seed*, the first pick is random (reproducibly). ``n >= len(pool)`` returns
     the whole pool. *start* indexes the filtered pool. *distance_matrix* defaults to
-    :func:`fallback_distance_matrix`.
+    :func:`default_distance_matrix`.
     """
     pool = [
         e
@@ -330,7 +352,7 @@ def sample(
         return []
     if len(pool) == 1:
         return pool[:1]
-    d = _checked_matrix((distance_matrix or fallback_distance_matrix)([e.keypoints_array() for e in pool]), len(pool))
+    d = _checked_matrix((distance_matrix or default_distance_matrix)([e.keypoints_array() for e in pool]), len(pool))
     clusters = [e.cluster for e in pool] if stratify and any(e.cluster is not None for e in pool) else None
     return [pool[i] for i in farthest_point_sample(d, n, seed=seed, clusters=clusters, start=start)]
 
@@ -340,12 +362,13 @@ def render_entries(
     size: tuple[int, int],
     options: RenderOptions | None = None,
     *,
-    margin: float = 0.05,
-    stroke_scale: float | Literal["auto"] = 1.0,
+    margin: float | None = None,
+    stroke_scale: float | Literal["auto"] | None = None,
 ) -> list[Image.Image]:
     """One control image per entry on a ``(width, height)`` canvas, each skeleton re-fitted into it: the bounding
     box of the points that will be drawn, scaled uniformly (aspect preserved) to fit inside *margin* (a fraction of
-    each side) and centred. ``options.width``/``height`` are ignored in favour of *size*."""
+    each side) and centred. ``options.width``/``height`` and ``options.fit`` are ignored in favour of *size* and
+    ``"skeleton"``; *margin* and *stroke_scale* default to the options' fields."""
     return [
         render_pose(e, options, canvas_size=size, fit="skeleton", margin=margin, stroke_scale=stroke_scale)
         for e in entries

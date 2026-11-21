@@ -32,6 +32,9 @@ asked for. ``fit`` decides how the source frame maps onto a canvas of another sh
 * ``"skeleton"``: ignore the source frame and fit the drawn points' bounding box into the canvas with a margin,
   uniformly scaled and centred. Used to re-frame library poses for a batch.
 
+Every one of these (``fit``, ``margin``, ``stroke_scale``, ``primary_only``) is a :class:`RenderOptions` field; the
+keyword arguments of the render functions override the options when given (``None`` means "take the option").
+
 A point maps as ``x' = x * scale + offset``. **Line widths and radii are fixed pixel sizes** (``stroke_scale=1``):
 4 px stick half-width, radius-4 joints, 2 px hand lines, radius-3 face dots, whatever the canvas size, as the
 annotators draw at their working resolution. The annotators usually draw at a ~512 px detect resolution and the
@@ -50,7 +53,7 @@ from typing import Literal
 import numpy as np
 from PIL import Image, ImageDraw
 
-from argus_puppet.models import PersonPose, PoseLibraryEntry, PoseResult, RenderOptions
+from argus_puppet.models import Fit, PersonPose, PoseLibraryEntry, PoseResult, RenderOptions
 from argus_puppet.skeleton import (
     FACE,
     HAND_EDGES,
@@ -76,6 +79,7 @@ __all__ = [
     "Fit",
     "PoseSource",
     "Transform",
+    "canvas_size",
     "canvas_transform",
     "render_array",
     "render_png",
@@ -101,7 +105,6 @@ def _hand_edge_color(i: int) -> tuple[int, int, int]:
 
 HAND_EDGE_COLORS: tuple[tuple[int, int, int], ...] = tuple(_hand_edge_color(i) for i in range(len(HAND_EDGES)))
 
-Fit = Literal["contain", "cover", "stretch", "skeleton"]
 PoseSource = PoseResult | PoseLibraryEntry | PersonPose | np.ndarray | Sequence[PersonPose] | Sequence[np.ndarray]
 _DEFAULT_MARGIN = 0.05
 
@@ -178,11 +181,14 @@ def canvas_transform(
     return Transform(s, s, (cw - sw * s) / 2, (ch - sh * s) / 2)
 
 
-def _resolve_canvas(
-    source_size: tuple[int, int], options: RenderOptions, canvas_size: tuple[int, int] | None
+def canvas_size(
+    source_size: tuple[int, int], options: RenderOptions | None = None, size: tuple[int, int] | None = None
 ) -> tuple[int, int]:
-    if canvas_size is not None:
-        w, h = int(canvas_size[0]), int(canvas_size[1])
+    """The ``(width, height)`` a render draws on: *size* if given, else ``options.width`` x ``options.height`` (one
+    alone keeps the source's aspect), else *source_size*."""
+    options = options or RenderOptions()
+    if size is not None:
+        w, h = int(size[0]), int(size[1])
     elif options.width is not None and options.height is not None:
         w, h = options.width, options.height
     elif options.width is not None:  # one side given: keep the source's aspect
@@ -196,6 +202,9 @@ def _resolve_canvas(
     if w < 1 or h < 1:
         raise ValueError(f"canvas size must be positive, got {(w, h)}")
     return w, h
+
+
+_canvas_size = canvas_size
 
 
 # ── input normalisation ──────────────────────────────────────────────────────────────────────────────────────────
@@ -368,15 +377,19 @@ def render_array(
     *,
     source_size: tuple[int, int] | None = None,
     canvas_size: tuple[int, int] | None = None,
-    primary_only: bool = False,
-    fit: Fit = "contain",
-    margin: float = _DEFAULT_MARGIN,
-    stroke_scale: float | Literal["auto"] = 1.0,
+    primary_only: bool | None = None,
+    fit: Fit | None = None,
+    margin: float | None = None,
+    stroke_scale: float | Literal["auto"] | None = None,
 ) -> np.ndarray:
     """The control image as an ``(height, width, 3)`` uint8 RGB array. Arguments as :func:`render_pose`."""
     opts = options or RenderOptions()
+    primary_only = opts.primary_only if primary_only is None else primary_only
+    fit = opts.fit if fit is None else fit
+    margin = opts.margin if margin is None else margin
+    stroke_scale = opts.stroke_scale if stroke_scale is None else stroke_scale
     people, src = _people_arrays(pose, source_size, primary_only)
-    w, h = _resolve_canvas(src, opts, canvas_size)
+    w, h = _canvas_size(src, opts, canvas_size)  # the module function: the argument shadows its name here
     if stroke_scale == "auto":
         k = min(w, h) / REFERENCE_RESOLUTION
     else:
@@ -405,10 +418,10 @@ def render_pose(
     *,
     source_size: tuple[int, int] | None = None,
     canvas_size: tuple[int, int] | None = None,
-    primary_only: bool = False,
-    fit: Fit = "contain",
-    margin: float = _DEFAULT_MARGIN,
-    stroke_scale: float | Literal["auto"] = 1.0,
+    primary_only: bool | None = None,
+    fit: Fit | None = None,
+    margin: float | None = None,
+    stroke_scale: float | Literal["auto"] | None = None,
 ) -> Image.Image:
     """Draw an OpenPose-convention control image.
 
@@ -420,7 +433,8 @@ def render_pose(
     The canvas is *canvas_size* ``(width, height)`` if given, else ``options.width`` x ``options.height`` (one
     alone keeps the source aspect), else the source size. *fit* maps the source frame onto it (see the module
     docstring; *margin* applies to ``"skeleton"`` only). *stroke_scale* multiplies every line width and radius;
-    ``"auto"`` is ``min(width, height) / 512``.
+    ``"auto"`` is ``min(width, height) / 512``. *primary_only*, *fit*, *margin* and *stroke_scale* default to the
+    *options* fields of the same name; a value given here overrides the option.
     """
     return Image.fromarray(
         render_array(
@@ -443,10 +457,10 @@ def render_png(
     *,
     source_size: tuple[int, int] | None = None,
     canvas_size: tuple[int, int] | None = None,
-    primary_only: bool = False,
-    fit: Fit = "contain",
-    margin: float = _DEFAULT_MARGIN,
-    stroke_scale: float | Literal["auto"] = 1.0,
+    primary_only: bool | None = None,
+    fit: Fit | None = None,
+    margin: float | None = None,
+    stroke_scale: float | Literal["auto"] | None = None,
 ) -> bytes:
     """:func:`render_pose` encoded as PNG bytes, with no metadata (same input, same bytes)."""
     img = render_pose(

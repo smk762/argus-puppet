@@ -1,5 +1,119 @@
 {
   "$defs": {
+    "BarePose": {
+      "description": "People's keypoints without the rest of a PoseResult: one person (133 points) or a list of people.",
+      "properties": {
+        "height": {
+          "description": "The keypoints' frame height in pixels.",
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Height",
+          "type": "integer"
+        },
+        "keypoints": {
+          "anyOf": [
+            {
+              "description": "Exactly 133 COCO-WholeBody keypoints, each (x, y, score): pixel coordinates and a score in [0, 1]. A point the estimator could not place has score 0.",
+              "items": {
+                "maxItems": 3,
+                "minItems": 3,
+                "prefixItems": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ],
+                "type": "array"
+              },
+              "maxItems": 133,
+              "minItems": 133,
+              "type": "array"
+            },
+            {
+              "items": {
+                "description": "Exactly 133 COCO-WholeBody keypoints, each (x, y, score): pixel coordinates and a score in [0, 1]. A point the estimator could not place has score 0.",
+                "items": {
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "prefixItems": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ],
+                  "type": "array"
+                },
+                "maxItems": 133,
+                "minItems": 133,
+                "type": "array"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "One person's 133 (x, y, score) points, or a list of such people.",
+          "title": "Keypoints"
+        },
+        "width": {
+          "description": "The keypoints' frame width in pixels.",
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keypoints",
+        "width",
+        "height"
+      ],
+      "title": "BarePose",
+      "type": "object"
+    },
+    "CompareRequest": {
+      "description": "``POST /compare``: an output set against a reference (training) set.",
+      "properties": {
+        "outputs": {
+          "$ref": "#/$defs/PoseSetSource"
+        },
+        "params": {
+          "$ref": "#/$defs/MetricParams",
+          "description": "Metric thresholds (default: suite's)."
+        },
+        "reference": {
+          "$ref": "#/$defs/PoseSetSource"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Memorisation distance (default: compare.DEFAULT_MEMORISATION_THRESHOLD, 0.08).",
+          "title": "Threshold"
+        }
+      },
+      "required": [
+        "outputs",
+        "reference"
+      ],
+      "title": "CompareRequest",
+      "type": "object"
+    },
     "Coverage": {
       "description": "How many usable poses carry each label. Producers list every label of each kind, zero or not.",
       "properties": {
@@ -125,6 +239,11 @@
     "Health": {
       "description": "``GET /health``.",
       "properties": {
+        "detector_model": {
+          "description": "Registry name of the person detector requests use.",
+          "title": "Detector Model",
+          "type": "string"
+        },
         "device": {
           "default": "cpu",
           "description": "'cpu' or 'cuda'.",
@@ -145,6 +264,12 @@
           "description": "Free GPU memory, when on CUDA and measurable.",
           "title": "Free Vram Mb"
         },
+        "gpu_coordinator": {
+          "default": "none",
+          "description": "GPU lease coordinator mode (ARGUS_GPU_COORDINATOR): 'none', 'lease' or 'broker'.",
+          "title": "Gpu Coordinator",
+          "type": "string"
+        },
         "models": {
           "additionalProperties": {
             "type": "boolean"
@@ -152,6 +277,11 @@
           "description": "Registry name -> whether its verified file is present.",
           "title": "Models",
           "type": "object"
+        },
+        "pose_model": {
+          "description": "Registry name of the pose model requests use.",
+          "title": "Pose Model",
+          "type": "string"
         },
         "provider": {
           "anyOf": [
@@ -184,39 +314,134 @@
       },
       "required": [
         "version",
-        "read_only"
+        "read_only",
+        "pose_model",
+        "detector_model"
       ],
       "title": "Health",
       "type": "object"
     },
+    "ImageOutcome": {
+      "description": "What happened to one image of a folder run.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The error, for a failed image.",
+          "title": "Detail"
+        },
+        "image": {
+          "description": "Path relative to the scanned root ('/' separators).",
+          "title": "Image",
+          "type": "string"
+        },
+        "people": {
+          "default": 0,
+          "description": "People found (0 unless written).",
+          "minimum": 0,
+          "title": "People",
+          "type": "integer"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why it was skipped ('exists', 'sidecar_collision', 'max_images', 'outside_root') or failed ('unreadable', 'too_large').",
+          "title": "Reason"
+        },
+        "sidecar": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The sidecar written, relative to the scanned root.",
+          "title": "Sidecar"
+        },
+        "status": {
+          "enum": [
+            "written",
+            "skipped",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "image",
+        "status"
+      ],
+      "title": "ImageOutcome",
+      "type": "object"
+    },
     "MetricParams": {
-      "description": "The thresholds a set's metrics were computed with.",
+      "description": "The thresholds a set's metrics were computed with. Every field has the suite default, so ``{}`` (or leaving\n``params`` out of a request) means \"the defaults\".",
       "properties": {
         "cluster_threshold": {
+          "default": 0.25,
           "description": "Pose distance below which two poses join the same cluster.",
           "minimum": 0.0,
           "title": "Cluster Threshold",
           "type": "number"
         },
+        "diversity_scale": {
+          "default": 0.3,
+          "description": "Distance scale of the diversity score: a pair this far apart adds 1 - 1/e (0.63) to the mean.",
+          "exclusiveMinimum": 0.0,
+          "title": "Diversity Scale",
+          "type": "number"
+        },
         "min_joint_score": {
-          "description": "A joint counts as confident at or above this score.",
+          "default": 0.3,
+          "description": "A joint counts as confident at or above this.",
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Min Joint Score",
           "type": "number"
         },
+        "min_shared_joints": {
+          "default": 6,
+          "description": "Body joints that must be confident in both poses for their distance to be defined.",
+          "maximum": 17,
+          "minimum": 1,
+          "title": "Min Shared Joints",
+          "type": "integer"
+        },
+        "min_shared_limb_joints": {
+          "default": 2,
+          "description": "Of those, how many must be limb joints (elbows, wrists, knees, ankles).",
+          "maximum": 8,
+          "minimum": 0,
+          "title": "Min Shared Limb Joints",
+          "type": "integer"
+        },
         "min_usable_joints": {
+          "default": 8,
           "description": "Confident body joints a primary person needs for the image to be usable.",
+          "maximum": 17,
           "minimum": 1,
           "title": "Min Usable Joints",
           "type": "integer"
         }
       },
-      "required": [
-        "min_joint_score",
-        "min_usable_joints",
-        "cluster_threshold"
-      ],
       "title": "MetricParams",
       "type": "object"
     },
@@ -462,6 +687,12 @@
     "PoseLibrary": {
       "description": "A set of poses to sample from for pose-conditioned generation.",
       "properties": {
+        "age_checked": {
+          "default": false,
+          "description": "Whether the suite's age fail-safe ran on every source image at build time (argus-curator's POST /faces?body=true): when true, no entry comes from a frame where any face or body read under 18, or that could not be checked.",
+          "title": "Age Checked",
+          "type": "boolean"
+        },
         "created_from": {
           "default": "",
           "description": "Where the poses came from, e.g. 'CC0 photos of adults, folder poses/'.",
@@ -590,10 +821,18 @@
       "description": "An output image's nearest reference pose.",
       "properties": {
         "distance": {
-          "description": "Pose distance between the two.",
-          "minimum": 0.0,
-          "title": "Distance",
-          "type": "number"
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pose distance between the two; null exactly when nearest is null.",
+          "title": "Distance"
         },
         "image": {
           "description": "The output image.",
@@ -601,20 +840,26 @@
           "type": "string"
         },
         "memorised": {
-          "description": "Whether distance is below the comparison's threshold.",
+          "description": "Whether distance is below the comparison's threshold; always false without a match.",
           "title": "Memorised",
           "type": "boolean"
         },
         "nearest": {
-          "description": "The reference image with the closest pose.",
-          "title": "Nearest",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The reference image with the closest pose; null when the output is unusable or shares too few joints with every reference pose (no comparable reference pose).",
+          "title": "Nearest"
         }
       },
       "required": [
         "image",
-        "nearest",
-        "distance",
         "memorised"
       ],
       "title": "PoseMatch",
@@ -713,10 +958,17 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "The estimator that produced every pose on both sides, when they all share one."
+        },
+        "matched_count": {
+          "description": "Outputs with a nearest reference pose: usable, and comparable with at least one usable reference pose. memorised_share is over these.",
+          "minimum": 0,
+          "title": "Matched Count",
+          "type": "integer"
         },
         "matches": {
-          "description": "One per usable output image.",
+          "description": "One per output image, sorted by image name; nearest/distance are null for an unmatched output.",
           "items": {
             "$ref": "#/$defs/PoseMatch"
           },
@@ -724,14 +976,14 @@
           "type": "array"
         },
         "memorised_share": {
-          "description": "Share of matches flagged memorised.",
+          "description": "Memorised outputs / matched_count (0 when nothing matched). Unusable and unmatched outputs are left out of the denominator: they are no evidence either way.",
           "maximum": 1.0,
           "minimum": 0.0,
           "title": "Memorised Share",
           "type": "number"
         },
         "output_count": {
-          "description": "Usable output poses compared.",
+          "description": "Output images compared, usable or not (one match entry each).",
           "minimum": 0,
           "title": "Output Count",
           "type": "integer"
@@ -765,6 +1017,7 @@
       },
       "required": [
         "output_count",
+        "matched_count",
         "reference_count",
         "memorised_share",
         "threshold",
@@ -835,6 +1088,48 @@
       "title": "PoseSetItem",
       "type": "object"
     },
+    "PoseSetSource": {
+      "description": "A set of poses, given inline or as a folder of sidecars under the data root: exactly one of the two.",
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A folder relative to ARGUS_PUPPET_DATA_ROOT whose <stem>.pose.json sidecars are the set.",
+          "title": "Path"
+        },
+        "recursive": {
+          "default": true,
+          "description": "With path: include sidecars in subfolders.",
+          "title": "Recursive",
+          "type": "boolean"
+        },
+        "results": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PoseResult"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The poses themselves (e.g. sidecars a client read).",
+          "title": "Results"
+        }
+      },
+      "title": "PoseSetSource",
+      "type": "object"
+    },
     "PoseSetStats": {
       "description": "Pose diversity and coverage of one image set (argus-proof's pose-diversity gate reads ``diversity``).",
       "properties": {
@@ -877,7 +1172,7 @@
             }
           ],
           "default": null,
-          "description": "The estimator, when the stats extracted poses."
+          "description": "The estimator that produced every pose in the set, when they all share one."
         },
         "items": {
           "items": {
@@ -927,7 +1222,7 @@
       "type": "object"
     },
     "RenderOptions": {
-      "description": "How to draw an OpenPose-convention skeleton control image.",
+      "description": "How to draw an OpenPose-convention skeleton control image (see docs/conditioning.md).",
       "properties": {
         "body": {
           "default": true,
@@ -940,6 +1235,18 @@
           "description": "Draw the face landmarks.",
           "title": "Face",
           "type": "boolean"
+        },
+        "fit": {
+          "default": "contain",
+          "description": "How the source frame maps onto a canvas of another shape: 'contain' (letterbox, the default), 'cover' (fill, cropping), 'stretch' (distorts), or 'skeleton' (fit the drawn points into the canvas less margin, ignoring the source frame).",
+          "enum": [
+            "contain",
+            "cover",
+            "stretch",
+            "skeleton"
+          ],
+          "title": "Fit",
+          "type": "string"
         },
         "hands": {
           "default": true,
@@ -962,6 +1269,14 @@
           "description": "Output height; default the source image's.",
           "title": "Height"
         },
+        "margin": {
+          "default": 0.05,
+          "description": "fit='skeleton' only: the fraction of each side kept clear on every edge.",
+          "exclusiveMaximum": 0.5,
+          "minimum": 0.0,
+          "title": "Margin",
+          "type": "number"
+        },
         "min_score": {
           "default": 0.3,
           "description": "Points below this score are not drawn.",
@@ -969,6 +1284,28 @@
           "minimum": 0.0,
           "title": "Min Score",
           "type": "number"
+        },
+        "primary_only": {
+          "default": false,
+          "description": "Draw only the primary person (default: everyone).",
+          "title": "Primary Only",
+          "type": "boolean"
+        },
+        "stroke_scale": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "maximum": 64.0,
+              "type": "number"
+            },
+            {
+              "const": "auto",
+              "type": "string"
+            }
+          ],
+          "default": 1.0,
+          "description": "Multiplies every line width and radius; 'auto' is min(width, height) / 512, as the annotators' ~512 px working resolution looks once resized.",
+          "title": "Stroke Scale"
         },
         "width": {
           "anyOf": [
@@ -987,6 +1324,174 @@
         }
       },
       "title": "RenderOptions",
+      "type": "object"
+    },
+    "RenderRequest": {
+      "description": "``POST /render``: one pose to an OpenPose-convention control PNG.",
+      "properties": {
+        "options": {
+          "$ref": "#/$defs/RenderOptions"
+        },
+        "pose": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PoseResult"
+            },
+            {
+              "$ref": "#/$defs/BarePose"
+            }
+          ],
+          "description": "A PoseResult (e.g. a sidecar), or bare keypoints + frame.",
+          "title": "Pose"
+        }
+      },
+      "required": [
+        "pose"
+      ],
+      "title": "RenderRequest",
+      "type": "object"
+    },
+    "ScanRequest": {
+      "description": "``POST /pose/scan``: a folder under the data root to pose into sidecars.",
+      "properties": {
+        "overwrite": {
+          "default": false,
+          "description": "Re-pose images that already have a sidecar.",
+          "title": "Overwrite",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Folder (or one image) relative to ARGUS_PUPPET_DATA_ROOT.",
+          "title": "Path",
+          "type": "string"
+        },
+        "recursive": {
+          "default": false,
+          "description": "Include subfolders.",
+          "title": "Recursive",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "ScanRequest",
+      "type": "object"
+    },
+    "ScanSummary": {
+      "description": "A folder run's totals and per-image outcomes (``argus-puppet pose --json`` and ``POST /pose/scan``).",
+      "properties": {
+        "failed": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "Images that failed, by reason.",
+          "title": "Failed",
+          "type": "object"
+        },
+        "images": {
+          "default": 0,
+          "description": "Images found.",
+          "minimum": 0,
+          "title": "Images",
+          "type": "integer"
+        },
+        "outcomes": {
+          "items": {
+            "$ref": "#/$defs/ImageOutcome"
+          },
+          "title": "Outcomes",
+          "type": "array"
+        },
+        "people": {
+          "default": 0,
+          "description": "People found across the written images.",
+          "minimum": 0,
+          "title": "People",
+          "type": "integer"
+        },
+        "puppet_version": {
+          "default": "1.0",
+          "title": "Puppet Version",
+          "type": "string"
+        },
+        "root": {
+          "description": "The folder scanned, as the caller named it.",
+          "title": "Root",
+          "type": "string"
+        },
+        "skipped": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "Images skipped, by reason.",
+          "title": "Skipped",
+          "type": "object"
+        },
+        "truncated": {
+          "default": false,
+          "description": "Whether the per-run image cap stopped the run early.",
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "written": {
+          "default": 0,
+          "description": "Sidecars written.",
+          "minimum": 0,
+          "title": "Written",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "title": "ScanSummary",
+      "type": "object"
+    },
+    "StatsRequest": {
+      "description": "``POST /stats``: one set's pose diversity and coverage.",
+      "properties": {
+        "params": {
+          "$ref": "#/$defs/MetricParams",
+          "description": "Metric thresholds (default: suite's)."
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A folder relative to ARGUS_PUPPET_DATA_ROOT whose <stem>.pose.json sidecars are the set.",
+          "title": "Path"
+        },
+        "recursive": {
+          "default": true,
+          "description": "With path: include sidecars in subfolders.",
+          "title": "Recursive",
+          "type": "boolean"
+        },
+        "results": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PoseResult"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The poses themselves (e.g. sidecars a client read).",
+          "title": "Results"
+        }
+      },
+      "title": "StatsRequest",
       "type": "object"
     }
   },

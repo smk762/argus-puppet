@@ -323,3 +323,24 @@ def test_png_is_deterministic_and_decodes_to_the_array() -> None:
     assert one == two and one[:8] == b"\x89PNG\r\n\x1a\n"
     decoded = np.asarray(Image.open(io.BytesIO(one)).convert("RGB"))
     assert np.array_equal(decoded, render_array(r))
+
+
+def test_options_carry_fit_stroke_margin_and_primary_and_keywords_override_them() -> None:
+    a, b = figure(), figure(dx=40, arms_up=True)
+    r = result([a, b], width=200, height=200, primary=1)
+    opts = RenderOptions(width=120, height=300, fit="skeleton", margin=0.2, stroke_scale=2.0, primary_only=True)
+    from_options = render_array(r, opts)
+    by_keywords = render_array(
+        r, RenderOptions(width=120, height=300), fit="skeleton", margin=0.2, stroke_scale=2.0, primary_only=True
+    )
+    assert np.array_equal(from_options, by_keywords)
+    assert not np.array_equal(from_options, render_array(r, opts, fit="contain"))  # a keyword wins over the option
+    assert np.array_equal(
+        render_array(r, opts, primary_only=False), render_array(r, opts.model_copy(update={"primary_only": False}))
+    )
+    ys, xs = np.nonzero(from_options.any(axis=-1))
+    assert ys.min() >= 0.2 * 300 - 9 and ys.max() <= 0.8 * 300 + 9  # inside the 20 % margin, give a stroke
+    auto = RenderOptions(width=1024, height=1024, stroke_scale="auto", hands=False, face=False)
+    assert np.count_nonzero(render_array(a, auto, source_size=(100, 200)).any(-1)) > np.count_nonzero(
+        render_array(a, auto, source_size=(100, 200), stroke_scale=1.0).any(-1)
+    )

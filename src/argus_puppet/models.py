@@ -18,6 +18,8 @@ Conventions everywhere:
 from __future__ import annotations
 
 import math
+from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -25,6 +27,12 @@ import numpy as np
 from argus_cortex.wire import make_versioned_base, render_schema
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, field_validator, model_validator
 
+from argus_puppet.embedding import (
+    DEFAULT_MIN_JOINT_SCORE,
+    DEFAULT_MIN_SHARED_JOINTS,
+    DEFAULT_MIN_SHARED_LIMB_JOINTS,
+    DEFAULT_MIN_USABLE_JOINTS,
+)
 from argus_puppet.skeleton import LAYOUT, NUM_KEYPOINTS, part_mean_scores
 
 # 1.0: initial contract.
@@ -241,15 +249,47 @@ class PoseCluster(BaseModel):
     medoid: str = Field(..., description="The image whose pose is most central to the cluster.")
 
 
-class MetricParams(BaseModel):
-    """The thresholds a set's metrics were computed with."""
+# Average-linkage cut, in torso units. Two renders of one pose with estimator-level noise and a few degrees of limb
+# variation sit 0.05-0.2 apart; the nearest distinct presets of the synthetic library (standing vs hands-on-hips,
+# T-pose vs reach) sit 0.35 and more apart, and different stances 0.6-1.5. See docs/metrics.md.
+DEFAULT_CLUSTER_THRESHOLD = 0.25
+# Diversity is the mean, over comparable pairs, of g(d) = 1 - exp(-(d / scale)^2): a pair at distance 0 adds nothing,
+# a pair *scale* apart adds 0.63, and a pair of different stances (d >= 0.6) adds 0.9 or more. The quadratic exponent
+# keeps the slope at d = 0 flat, so estimator jitter on one repeated pose scores near zero. Calibrated on the
+# synthetic generators: see docs/metrics.md.
+DEFAULT_DIVERSITY_SCALE = 0.3
 
-    min_joint_score: Unit = Field(..., description="A joint counts as confident at or above this score.")
+
+class MetricParams(BaseModel):
+    """The thresholds a set's metrics were computed with. Every field has the suite default, so ``{}`` (or leaving
+    ``params`` out of a request) means "the defaults"."""
+
+    min_joint_score: Unit = Field(DEFAULT_MIN_JOINT_SCORE, description="A joint counts as confident at or above this.")
     min_usable_joints: int = Field(
-        ..., ge=1, description="Confident body joints a primary person needs for the image to be usable."
+        DEFAULT_MIN_USABLE_JOINTS,
+        ge=1,
+        le=17,
+        description="Confident body joints a primary person needs for the image to be usable.",
     )
     cluster_threshold: float = Field(
-        ..., ge=0.0, description="Pose distance below which two poses join the same cluster."
+        DEFAULT_CLUSTER_THRESHOLD, ge=0.0, description="Pose distance below which two poses join the same cluster."
+    )
+    min_shared_joints: int = Field(
+        DEFAULT_MIN_SHARED_JOINTS,
+        ge=1,
+        le=17,
+        description="Body joints that must be confident in both poses for their distance to be defined.",
+    )
+    min_shared_limb_joints: int = Field(
+        DEFAULT_MIN_SHARED_LIMB_JOINTS,
+        ge=0,
+        le=8,
+        description="Of those, how many must be limb joints (elbows, wrists, knees, ankles).",
+    )
+    diversity_scale: float = Field(
+        DEFAULT_DIVERSITY_SCALE,
+        gt=0.0,
+        description="Distance scale of the diversity score: a pair this far apart adds 1 - 1/e (0.63) to the mean.",
     )
 
 
@@ -270,7 +310,9 @@ class PoseSetStats(_Versioned):
     coverage: Coverage = Field(default_factory=Coverage)
     items: list[PoseSetItem] = Field(default_factory=list)
     params: MetricParams
-    estimator: EstimatorProvenance | None = Field(None, description="The estimator, when the stats extracted poses.")
+    estimator: EstimatorProvenance | None = Field(
+        None, description="The estimator that produced every pose in the set, when they all share one."
+    )
 
     @model_validator(mode="after")
     def _counts_agree(self) -> PoseSetStats:
@@ -285,18 +327,47 @@ class PoseMatch(BaseModel):
     """An output image's nearest reference pose."""
 
     image: str = Field(..., description="The output image.")
-    nearest: str = Field(..., description="The reference image with the closest pose.")
-    distance: float = Field(..., ge=0.0, description="Pose distance between the two.")
-    memorised: bool = Field(..., description="Whether distance is below the comparison's threshold.")
+    nearest: str | None = Field(
+        None,
+        description="The reference image with the closest pose; null when the output is unusable or shares too few "
+        "joints with every reference pose (no comparable reference pose).",
+    )
+    distance: float | None = Field(
+        None, ge=0.0, description="Pose distance between the two; null exactly when nearest is null."
+    )
+    memorised: bool = Field(
+        ..., description="Whether distance is below the comparison's threshold; always false without a match."
+    )
+
+    @model_validator(mode="after")
+    def _match_agrees(self) -> PoseMatch:
+        if (self.nearest is None) != (self.distance is None):
+            raise ValueError("nearest and distance are both set or both null")
+        if self.nearest is None and self.memorised:
+            raise ValueError("an output with no comparable reference pose cannot be memorised")
+        return self
 
 
 class PoseSetComparison(_Versioned):
     """An output set's poses against a reference (training) set: copied poses and coverage drift."""
 
-    output_count: int = Field(..., ge=0, description="Usable output poses compared.")
+    output_count: int = Field(..., ge=0, description="Output images compared, usable or not (one match entry each).")
+    matched_count: int = Field(
+        ...,
+        ge=0,
+        description="Outputs with a nearest reference pose: usable, and comparable with at least one usable "
+        "reference pose. memorised_share is over these.",
+    )
     reference_count: int = Field(..., ge=0, description="Usable reference poses compared against.")
-    matches: list[PoseMatch] = Field(default_factory=list, description="One per usable output image.")
-    memorised_share: Unit = Field(..., description="Share of matches flagged memorised.")
+    matches: list[PoseMatch] = Field(
+        default_factory=list,
+        description="One per output image, sorted by image name; nearest/distance are null for an unmatched output.",
+    )
+    memorised_share: Unit = Field(
+        ...,
+        description="Memorised outputs / matched_count (0 when nothing matched). Unusable and unmatched outputs are "
+        "left out of the denominator: they are no evidence either way.",
+    )
     threshold: float = Field(..., ge=0.0, description="Pose distance below which an output counts as memorised.")
     coverage_divergence: Unit = Field(
         ...,
@@ -306,14 +377,29 @@ class PoseSetComparison(_Versioned):
     output_coverage: Coverage = Field(default_factory=Coverage)
     reference_coverage: Coverage = Field(default_factory=Coverage)
     params: MetricParams
-    estimator: EstimatorProvenance | None = None
+    estimator: EstimatorProvenance | None = Field(
+        None, description="The estimator that produced every pose on both sides, when they all share one."
+    )
+
+    @model_validator(mode="after")
+    def _counts_agree(self) -> PoseSetComparison:
+        if self.matched_count > self.output_count:
+            raise ValueError(f"matched_count {self.matched_count} exceeds output_count {self.output_count}")
+        if len(self.matches) != self.output_count:
+            raise ValueError(f"{len(self.matches)} matches for output_count {self.output_count}")
+        if sum(m.nearest is not None for m in self.matches) != self.matched_count:
+            raise ValueError("matched_count disagrees with the matches that have a nearest reference")
+        return self
 
 
 # ── conditioning ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 
+Fit = Literal["contain", "cover", "stretch", "skeleton"]
+
+
 class RenderOptions(BaseModel):
-    """How to draw an OpenPose-convention skeleton control image."""
+    """How to draw an OpenPose-convention skeleton control image (see docs/conditioning.md)."""
 
     body: bool = Field(True, description="Draw the 18-joint body.")
     hands: bool = Field(True, description="Draw both hands.")
@@ -321,6 +407,21 @@ class RenderOptions(BaseModel):
     width: int | None = Field(None, ge=1, le=8192, description="Output width; default the source image's.")
     height: int | None = Field(None, ge=1, le=8192, description="Output height; default the source image's.")
     min_score: Unit = Field(0.3, description="Points below this score are not drawn.")
+    fit: Fit = Field(
+        "contain",
+        description="How the source frame maps onto a canvas of another shape: 'contain' (letterbox, the default), "
+        "'cover' (fill, cropping), 'stretch' (distorts), or 'skeleton' (fit the drawn points into the canvas less "
+        "margin, ignoring the source frame).",
+    )
+    primary_only: bool = Field(False, description="Draw only the primary person (default: everyone).")
+    stroke_scale: Annotated[float, Field(gt=0.0, le=64.0)] | Literal["auto"] = Field(
+        1.0,
+        description="Multiplies every line width and radius; 'auto' is min(width, height) / 512, as the annotators' "
+        "~512 px working resolution looks once resized.",
+    )
+    margin: float = Field(
+        0.05, ge=0.0, lt=0.5, description="fit='skeleton' only: the fraction of each side kept clear on every edge."
+    )
 
 
 class PoseLibraryEntry(BaseModel):
@@ -345,6 +446,12 @@ class PoseLibrary(_Versioned):
 
     layout: Layout = LAYOUT
     created_from: str = Field("", description="Where the poses came from, e.g. 'CC0 photos of adults, folder poses/'.")
+    age_checked: bool = Field(
+        False,
+        description="Whether the suite's age fail-safe ran on every source image at build time (argus-curator's "
+        "POST /faces?body=true): when true, no entry comes from a frame where any face or body read under 18, or "
+        "that could not be checked.",
+    )
     estimator: EstimatorProvenance | None = Field(None, description="The estimator that extracted the poses.")
     entries: list[PoseLibraryEntry] = Field(default_factory=list)
 
@@ -369,9 +476,131 @@ class Health(_Versioned):
     models: dict[str, bool] = Field(
         default_factory=dict, description="Registry name -> whether its verified file is present."
     )
+    pose_model: str = Field(..., description="Registry name of the pose model requests use.")
+    detector_model: str = Field(..., description="Registry name of the person detector requests use.")
     provider: str | None = Field(None, description="ONNX Runtime provider in use, once a model is loaded.")
     device: str = Field("cpu", description="'cpu' or 'cuda'.")
+    gpu_coordinator: str = Field(
+        "none", description="GPU lease coordinator mode (ARGUS_GPU_COORDINATOR): 'none', 'lease' or 'broker'."
+    )
     free_vram_mb: int | None = Field(None, ge=0, description="Free GPU memory, when on CUDA and measurable.")
+
+
+# ── folder runs ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+ScanStatus = Literal["written", "skipped", "failed"]
+# ImageOutcome.reason of an image left out because the per-run image cap was reached (ScanSummary.truncated).
+SKIP_MAX_IMAGES = "max_images"
+
+
+class ImageOutcome(BaseModel):
+    """What happened to one image of a folder run."""
+
+    image: str = Field(..., description="Path relative to the scanned root ('/' separators).")
+    status: ScanStatus
+    reason: str | None = Field(
+        None,
+        description="Why it was skipped ('exists', 'sidecar_collision', 'max_images', 'outside_root') or failed "
+        "('unreadable', 'too_large').",
+    )
+    detail: str | None = Field(None, description="The error, for a failed image.")
+    people: int = Field(0, ge=0, description="People found (0 unless written).")
+    sidecar: str | None = Field(None, description="The sidecar written, relative to the scanned root.")
+
+
+class ScanSummary(_Versioned):
+    """A folder run's totals and per-image outcomes (``argus-puppet pose --json`` and ``POST /pose/scan``)."""
+
+    root: str = Field(..., description="The folder scanned, as the caller named it.")
+    images: int = Field(0, ge=0, description="Images found.")
+    written: int = Field(0, ge=0, description="Sidecars written.")
+    people: int = Field(0, ge=0, description="People found across the written images.")
+    skipped: dict[str, int] = Field(default_factory=dict, description="Images skipped, by reason.")
+    failed: dict[str, int] = Field(default_factory=dict, description="Images that failed, by reason.")
+    truncated: bool = Field(False, description="Whether the per-run image cap stopped the run early.")
+    outcomes: list[ImageOutcome] = Field(default_factory=list)
+
+    @classmethod
+    def of(cls, root: str, outcomes: Iterable[ImageOutcome]) -> ScanSummary:
+        items = list(outcomes)
+        skipped = Counter(o.reason or "" for o in items if o.status == "skipped")
+        failed = Counter(o.reason or "" for o in items if o.status == "failed")
+        return cls(
+            root=root,
+            images=len(items),
+            written=sum(o.status == "written" for o in items),
+            people=sum(o.people for o in items),
+            skipped=dict(sorted(skipped.items())),
+            failed=dict(sorted(failed.items())),
+            truncated=skipped.get(SKIP_MAX_IMAGES, 0) > 0,
+            outcomes=items,
+        )
+
+
+# ── requests ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+class ScanRequest(BaseModel):
+    """``POST /pose/scan``: a folder under the data root to pose into sidecars."""
+
+    path: str = Field(..., description="Folder (or one image) relative to ARGUS_PUPPET_DATA_ROOT.")
+    recursive: bool = Field(False, description="Include subfolders.")
+    overwrite: bool = Field(False, description="Re-pose images that already have a sidecar.")
+
+
+class PoseSetSource(BaseModel):
+    """A set of poses, given inline or as a folder of sidecars under the data root: exactly one of the two."""
+
+    results: list[PoseResult] | None = Field(None, description="The poses themselves (e.g. sidecars a client read).")
+    path: str | None = Field(
+        None, description="A folder relative to ARGUS_PUPPET_DATA_ROOT whose <stem>.pose.json sidecars are the set."
+    )
+    recursive: bool = Field(True, description="With path: include sidecars in subfolders.")
+
+    @model_validator(mode="after")
+    def _one_source(self) -> PoseSetSource:
+        if (self.results is None) == (self.path is None):
+            raise ValueError("give exactly one of results or path")
+        return self
+
+
+class StatsRequest(PoseSetSource):
+    """``POST /stats``: one set's pose diversity and coverage."""
+
+    params: MetricParams = Field(default_factory=MetricParams, description="Metric thresholds (default: suite's).")
+
+
+class CompareRequest(BaseModel):
+    """``POST /compare``: an output set against a reference (training) set."""
+
+    outputs: PoseSetSource
+    reference: PoseSetSource
+    threshold: float | None = Field(
+        None, ge=0.0, description="Memorisation distance (default: compare.DEFAULT_MEMORISATION_THRESHOLD, 0.08)."
+    )
+    params: MetricParams = Field(default_factory=MetricParams, description="Metric thresholds (default: suite's).")
+
+
+class BarePose(BaseModel):
+    """People's keypoints without the rest of a PoseResult: one person (133 points) or a list of people."""
+
+    keypoints: Keypoints | list[Keypoints] = Field(
+        ..., description="One person's 133 (x, y, score) points, or a list of such people."
+    )
+    width: int = Field(..., ge=1, le=65535, description="The keypoints' frame width in pixels.")
+    height: int = Field(..., ge=1, le=65535, description="The keypoints' frame height in pixels.")
+
+    def people(self) -> list[np.ndarray]:
+        """Each person as a ``(133, 3)`` array."""
+        arr = np.asarray(self.keypoints, dtype=np.float64)
+        return [arr] if arr.ndim == 2 else list(arr)
+
+
+class RenderRequest(BaseModel):
+    """``POST /render``: one pose to an OpenPose-convention control PNG."""
+
+    pose: PoseResult | BarePose = Field(..., description="A PoseResult (e.g. a sidecar), or bare keypoints + frame.")
+    options: RenderOptions = Field(default_factory=RenderOptions)
 
 
 WIRE_MODELS: tuple[type[BaseModel], ...] = (
@@ -381,6 +610,11 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
     PoseLibrary,
     RenderOptions,
     Health,
+    ScanSummary,
+    ScanRequest,
+    StatsRequest,
+    CompareRequest,
+    RenderRequest,
 )
 
 
