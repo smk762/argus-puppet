@@ -38,9 +38,12 @@ def _fresh_cuda_state(monkeypatch) -> Iterator[None]:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch) -> None:
+    """No test sees the developer's settings: not the shell's ``ARGUS_*`` variables that puppet or cortex read, and
+    never the suite file (``ARGUS_ENV_FILE=off``), whose values a failed assert could print."""
     for key in list(os.environ):
-        if key.startswith(("ARGUS_PUPPET_", "ARGUS_GPU_")):
+        if key.startswith(("ARGUS_PUPPET_", "ARGUS_GPU_")) or key in ("ARGUS_CURATOR_URL", "ARGUS_PEER", "ARGUS_BUILD"):
             monkeypatch.delenv(key)
+    monkeypatch.setenv("ARGUS_ENV_FILE", "off")
 
 
 def draw_image(

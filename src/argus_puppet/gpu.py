@@ -17,12 +17,12 @@ will not help); neither is a bad image.
 from __future__ import annotations
 
 import contextlib
-import os
 import threading
 import weakref
 from collections.abc import Callable, Iterator
 from typing import Any
 
+from argus_cortex import settings as suite_settings
 from argus_cortex.gpu import GpuCoordinator, GpuLease, GpuLeaseRefused, GpuLeaseTimeout, coordinator_from_env
 from argus_cortex.gpu_wire import PRIORITY_CLASSES, PriorityClass
 
@@ -84,7 +84,8 @@ def operator_message(exc: Exception) -> str:
     if isinstance(exc, CoordinatorInvalid):
         return str(exc)
     detail = str(exc)
-    token = os.environ.get("ARGUS_GPU_BROKER_TOKEN", "").strip()
+    # Read where cortex's coordinator reads it: the environment, then the suite file (argus_cortex.settings).
+    token = suite_settings.get("ARGUS_GPU_BROKER_TOKEN")
     if token:
         detail = detail.replace(token, "***")
     return (

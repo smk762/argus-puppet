@@ -8,8 +8,8 @@ faces plus a body pass, MiVOLO ages for both), the same service argus-darkroom's
   body in one image, ``None`` when there is nobody to estimate, and raises :class:`AgeUnavailable` when the check
   cannot vouch for the image (service down, an error answer, a face or body without an estimate, a body pass that
   did not run). Callers **fail closed**: an image that raised, or read ``None``, is excluded.
-* :class:`HttpAgeEstimator` posts the image bytes to the URL in the settings (``ARGUS_PUPPET_AGE_URL``, never a URL a
-  caller supplied), through :func:`argus_cortex.net.fetch` with that one host allowed, a per-read timeout and an
+* :class:`HttpAgeEstimator` posts the image bytes to the URL in the settings (``ARGUS_PUPPET_AGE_URL``, else the
+  suite-wide ``ARGUS_CURATOR_URL``; never a URL a caller supplied), through :func:`argus_cortex.net.fetch` with that one host allowed, a per-read timeout and an
   overall deadline, and no redirects for the POST. Nothing is written.
 
 An estimate is a tool's reading of an image, never a stated age. Nothing is sent anywhere unless a caller asks for

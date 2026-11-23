@@ -47,6 +47,10 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | Work that runs on the CPU reported as CUDA, or a GPU lease taken for it (a CUDA build with no driver/GPU, or a session that came back without CUDA) | `tests/test_runtime.py::test_a_session_that_came_back_without_cuda_moves_auto_to_the_cpu`, `::test_no_driver_is_known_before_any_session`; `tests/test_gpu.py::test_no_lease_for_work_that_runs_on_the_cpu_of_a_cuda_build`, `::test_no_lease_once_a_session_came_back_without_cuda`; `tests/test_server.py::test_health_never_claims_cuda_for_a_cuda_build_without_a_gpu`, `::test_health_reports_a_session_that_fell_back_to_the_cpu` |
 | An explicit `ARGUS_PUPPET_DEVICE=cuda` run on the CPU instead of refused | `tests/test_runtime.py::test_explicit_cuda_is_refused_rather_than_run_on_the_cpu`, `::test_explicit_cuda_on_a_cpu_only_onnxruntime_is_refused`; `tests/test_server.py::test_explicit_cuda_without_a_gpu_is_a_loud_503` |
 | A broker refusal (4xx, unreadable reply) reported as a busy GPU with `Retry-After`, or the broker token echoed | `tests/test_gpu.py::test_a_broker_refusal_is_the_operators_not_a_busy_gpu`; `tests/test_server.py::test_a_broker_refusal_is_503_without_retry_after`; `tests/test_cli.py::test_pose_with_a_broker_refusal_says_it_is_the_operators` |
+| A `GET /health` that drops a `Health` field, or stops validating as cortex's `ServiceHealth` | `tests/test_server.py::test_health_is_the_suite_contract_and_keeps_every_field_it_had` |
+| A malformed curator URL (`ARGUS_PUPPET_AGE_URL` or the suite's `ARGUS_CURATOR_URL`) read as "no URL", or echoed | `tests/test_config.py::test_a_bad_age_url_is_a_config_error_not_unset_and_is_never_echoed` |
+| A compose service without the discovery labels (`argus.peer: puppet`), or the GPU service renamed from `argus-puppet` | `tests/test_compose.py::test_both_services_carry_the_discovery_labels` |
+| A test reading the developer's suite file or shell `ARGUS_*` settings | `tests/conftest.py::_clean_env` (autouse: `ARGUS_ENV_FILE=off`) |
 | A wire schema that drifts from `models.py` | CI `post-test`: `argus-puppet schema --check`; `tests/test_cli.py` |
 
 ## Layout
@@ -68,7 +72,9 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 - `registry.py` — the pinned model table (`PinnedModel`, `MODELS`, `DEFAULT_*`/`LIGHT_*`, `model_ref`). Data only; a new
   model needs a permissive licence and its sha256, or `tests/test_must_never.py` fails.
 - `config.py` — `Settings.from_env()` (`ARGUS_PUPPET_*`), `ConfigError`, and `DEFAULT_PORT` (the only code constant for the port;
-  it may change).
+  it may change). `age_url` is the one peer URL: `argus_cortex.peers.peer_url("curator", "ARGUS_PUPPET_AGE_URL")`, so
+  puppet's variable wins, then the suite-wide `ARGUS_CURATOR_URL` (environment, then the suite file); a malformed value
+  is a `ConfigError` naming the variable, never "unset" (`tests/test_config.py`).
 - `runtime.py` — ONNX Runtime plumbing: `providers(device)` (CUDA only while `cuda_problem()` is `None`: the provider
   compiled in, `_probe_cuda_driver` (ctypes `cuInit`/`cuDeviceGetCount`, once) sees a GPU, and no session came back
   without CUDA — `load_session` checks `session.get_providers()`; the first reason is kept, logged once as
@@ -121,7 +127,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   `library build|sample`, `serve`, `models list|fetch|verify`, `schema`, `version`. Heavy imports inside commands; logs
   go to stderr (the callback configures structlog) so `--json` stdout stays parseable. Run `make docs` after.
 - `server/app.py` — `create_app(settings, *, estimator=, coordinator=)` (and a lazy module-level `app` for uvicorn):
-  `GET /health`, `POST /pose` (writes nothing; inference via `asyncio.to_thread`, bounded concurrency -> 503), `POST
+  `GET /health` (cortex's `install_health`: `ServiceHealth` with every `Health` field beside it through `extra`; a new
+  `Health` field must not reuse a `ServiceHealth` name with another meaning), `POST /pose` (writes nothing; inference via `asyncio.to_thread`, bounded concurrency -> 503), `POST
   /pose/scan` (the one write; `path` fenced under `Settings.data_root` with `safe_join`), `POST /stats`, `/compare`
   (sets inline or as sidecar folders fenced like `/pose/scan`; `max_set_results` per set) and `/render` (PNG;
   `max_pixels`, `max_people`). Every body is read through `read_capped` (its cap counted as it streams, declared

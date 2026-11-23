@@ -99,8 +99,10 @@ for every face and every body it finds.
 An estimate is a model's reading of an image, never a person's stated age.
 
 **Nothing is sent anywhere without both the flag and a configured URL.** The URL comes only from
-`ARGUS_PUPPET_AGE_URL` (curator's base URL), never from a request or an argument; `--age-check` without it is an
-error. The call has a per-read timeout and an overall deadline, allows exactly the configured host, and does not
+the settings, never from a request or an argument: `ARGUS_PUPPET_AGE_URL` (curator's base URL), or, when that is
+unset, the suite-wide `ARGUS_CURATOR_URL` (from the environment or the
+[suite settings file](deploy.md#the-suite-settings-file)). `--age-check` with neither is an error, and so is a value
+that is not an `http(s)` URL: it is never read as "no URL". The call has a per-read timeout and an overall deadline, allows exactly the configured host, and does not
 follow redirects. The HTTP service has no route that runs the age check.
 
 Use the check whenever a library's sources are real photographs. Public-domain, CC0 or synthetic sources are still

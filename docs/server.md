@@ -38,25 +38,38 @@ curl -s http://<PUPPET_HOST>:8220/health
 ```
 
 ```json
-{"puppet_version": "1.3", "version": "0.2.0", "read_only": false,
+{"service_version": "1.0", "service": "argus-puppet", "version": "0.2.0", "status": "ok",
+ "started_at": "2026-11-23T09:00:00Z", "wire": {"puppet_version": "1.3"}, "capabilities": [], "checks": {},
+ "read_only": false, "build": null, "peer": "puppet",
+ "puppet_version": "1.3",
  "models": {"dwpose-l-384x288": true, "dwpose-m-256x192": true, "yolox_m": true, "yolox_nano": true},
  "pose_model": "dwpose-l-384x288", "detector_model": "yolox_m",
  "provider": null, "device": "cpu", "cuda_unavailable": null,
  "gpu_coordinator": "none", "last_lease_via": null, "free_vram_mb": null}
 ```
 
+The body is two contracts at once: the suite's `ServiceHealth` (argus-cortex's `argus_cortex.service`,
+`service_version` 1.0), which every Argus service answers, and puppet's own `Health` (`puppet_version`), whose fields
+are all still there under the same names. `version` and `read_only` belong to both and mean the same in each.
+
 | Field | Meaning |
 |---|---|
+| `service`, `version`, `started_at` | `argus-puppet`, the package version, and when this process started (UTC) |
+| `status` | `ok`. Puppet has no loading phase and probes no other service, so it never reports `starting` or `degraded` |
+| `wire` | The wire contracts it speaks: `{"puppet_version": ...}` |
+| `capabilities`, `checks` | Empty: puppet declares none |
+| `build`, `peer` | The image's build id (`ARGUS_BUILD`) and the container's `argus.peer` label (`ARGUS_PEER`; `puppet` in `compose.yaml`), `null` when the process was not told |
 | `models` | Registry name to whether its file is present and matches its pinned size and SHA-256. The first call hashes the files (about 310 MB), so it can take a few seconds; later calls use a cache |
 | `pose_model`, `detector_model` | The models `POST /pose` and `/pose/scan` run (`ARGUS_PUPPET_POSE_MODEL`, `ARGUS_PUPPET_DETECTOR_MODEL`) |
 | `provider` | The ONNX Runtime execution provider, or `null` until the first pose request loads a model |
 | `device` | Where pose work runs: `cuda` or `cpu`. See [Device](#device) |
 | `cuda_unavailable` | Why CUDA cannot be used, when the device setting wants it (`auto` or `cuda`) and it is known to be missing; else `null` |
-| `gpu_coordinator` | `none`, `lease` or `broker` (`ARGUS_GPU_COORDINATOR`), or `invalid` for an unknown value |
+| `gpu_coordinator` | `none`, `lease` or `broker` (`ARGUS_GPU_COORDINATOR`; unset, `broker` when `ARGUS_GPU_BROKER_URL` is set), or `invalid` for an unknown value |
 | `last_lease_via` | How the last GPU lease was granted: `local` (the `none` or `lease` coordinator), `broker`, or `fallback` (the broker could not be reached, so `ARGUS_GPU_BROKER_FALLBACK` granted it); `null` before the first lease |
 | `free_vram_mb` | Free GPU memory on CUDA when measurable, else `null` |
 
-Always 200.
+Always 200. `GET /health?checks=0` (what one service asks of another, and a container healthcheck) answers the same
+body. The route is not listed in the OpenAPI document.
 
 #### Device
 
