@@ -303,7 +303,7 @@ $ argus-puppet library build [OPTIONS] {folder}
 * `--seed <int>`: Seed for the --max-entries subset (default: deterministic)
 * `--recursive / --no-recursive`: Include subfolders  [default: recursive]
 * `--extract`: Pose the images that have no sidecar yet, first
-* `--age-check`: Send each source image to argus-curator (ARGUS_PUPPET_AGE_URL) and drop any frame where a face or body reads under 18, or that cannot be checked
+* `--age-check`: Send each source image to argus-curator (ARGUS_PUPPET_AGE_URL, else the suite-wide ARGUS_CURATOR_URL) and drop any frame where a face or body reads under 18, or that cannot be checked
 * `--device <str>`: Where to run extraction: auto, cpu, cuda (default: settings)
 * `--json`: Print the build counts as JSON
 * `--help`: Show this message and exit.

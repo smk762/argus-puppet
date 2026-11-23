@@ -218,7 +218,7 @@ included. With real photos, build with the age check on: `argus-puppet library b
 --age-check`, or `build_library(..., age_gate=AgeGate(HttpAgeEstimator(url), load_image))` from Python.
 
 - Each candidate image (one that would otherwise become an entry) is posted to argus-curator's
-  `POST /faces?body=true` at `ARGUS_PUPPET_AGE_URL`: InsightFace faces plus a body pass, each with a MiVOLO age
+  `POST /faces?body=true` at `ARGUS_PUPPET_AGE_URL` (else the suite-wide `ARGUS_CURATOR_URL`): InsightFace faces plus a body pass, each with a MiVOLO age
   estimate. The URL only ever comes from the settings, the call has a timeout and an overall deadline, and redirects
   are not followed. Nothing is sent unless the check is asked for.
 - The image is kept only when **every** face and body reads 18 or over.

@@ -568,8 +568,8 @@ def library_build(
     age_check: bool = Option(
         False,
         "--age-check",
-        help="Send each source image to argus-curator (ARGUS_PUPPET_AGE_URL) and drop any frame where a face or "
-        "body reads under 18, or that cannot be checked",
+        help="Send each source image to argus-curator (ARGUS_PUPPET_AGE_URL, else the suite-wide ARGUS_CURATOR_URL) and "
+        "drop any frame where a face or body reads under 18, or that cannot be checked",
     ),
     device: str | None = Option(None, "--device", help=DEVICE_HELP),
     as_json: bool = Option(False, "--json", help="Print the build counts as JSON"),
@@ -588,7 +588,10 @@ def library_build(
 
         settings = load_settings()
         if not settings.age_url:
-            raise fail("--age-check needs ARGUS_PUPPET_AGE_URL (argus-curator's base URL, e.g. http://localhost:8100)")
+            raise fail(
+                "--age-check needs ARGUS_PUPPET_AGE_URL, or the suite-wide ARGUS_CURATOR_URL (argus-curator's base "
+                "URL, e.g. http://localhost:8101)"
+            )
         estimator = HttpAgeEstimator(settings.age_url)
     if not folder.is_dir():
         raise fail(f"{folder} is not a folder")

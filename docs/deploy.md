@@ -86,10 +86,13 @@ VERSION=<version> .`). Without `VERSION` the image reports `0.0.0.dev0`.
 ## Health check
 
 `GET /health` answers with the package and wire versions and whether each pinned model file is present and
-verified. It also gives the provider and device, free VRAM on a GPU, and read-only mode:
+verified. It also gives the provider and device, free VRAM on a GPU, and read-only mode. The body is the suite's
+`ServiceHealth` (argus-cortex 0.16) with puppet's own fields beside it ([server.md](server.md#get-health)):
 
 ```json
-{"puppet_version": "1.3", "version": "0.2.0", "read_only": false,
+{"service_version": "1.0", "service": "argus-puppet", "version": "0.2.0", "status": "ok",
+ "started_at": "2026-11-23T09:00:00Z", "wire": {"puppet_version": "1.3"}, "capabilities": [], "checks": {},
+ "read_only": false, "build": null, "peer": "puppet", "puppet_version": "1.3",
  "models": {"dwpose-l-384x288": true, "dwpose-m-256x192": true, "yolox_m": true, "yolox_nano": true},
  "pose_model": "dwpose-l-384x288", "detector_model": "yolox_m",
  "provider": "CUDAExecutionProvider", "device": "cuda", "gpu_coordinator": "none", "free_vram_mb": 22544}
@@ -130,9 +133,43 @@ All `ARGUS_PUPPET_*` settings are read in `src/argus_puppet/config.py`:
 | `ARGUS_PUPPET_MAX_SET_RESULTS` | 5000 | Poses in one set of `POST /stats` or `/compare` (the distance matrix grows with the square). Past it: 413 |
 | `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | Largest JSON body `POST /stats` and `/compare` accept (`/render` takes at most 4 MiB), and with it the people one body may carry (this / 2048). Past it: 413 |
 | `ARGUS_PUPPET_BODY_TIMEOUT_S` | 60 | Seconds any `POST` body may take to arrive, upload or JSON. Past it: 408, the connection is closed and the call's admission slot is freed, so a slow client cannot hold one |
-| `ARGUS_PUPPET_AGE_URL` | unset | argus-curator's base URL, for `argus-puppet library build --age-check` only. Unset: the check cannot run and nothing is sent ([index.md](index.md#privacy-and-the-age-fail-safe)) |
+| `ARGUS_PUPPET_AGE_URL` | unset | argus-curator's base URL, for `argus-puppet library build --age-check` only. Unset: the suite-wide `ARGUS_CURATOR_URL` is used (environment, then the [suite settings file](#the-suite-settings-file)); `off` ignores that too. Neither set: the check cannot run and nothing is sent ([index.md](index.md#privacy-and-the-age-fail-safe)). A value that is not an absolute `http(s)` URL is a configuration error at startup, naming the variable |
 
 The image also sets `ARGUS_GPU_TENANT_MANIFEST=/app/gpu-tenant.yaml` (see [GPU sharing](#gpu-sharing-argus-iris)).
+
+### The suite settings file
+
+Values every Argus service on a host shares (`ARGUS_GPU_BROKER_URL`, `ARGUS_GPU_BROKER_TOKEN`, `ARGUS_CURATOR_URL`)
+can live once in argus-cortex's suite file instead of in each service's `.env`: `~/.config/argus/suite.env` for the
+CLI (`python -m argus_cortex.settings --init` creates it with mode 600; `ARGUS_ENV_FILE` names another, `off`
+disables it), `/etc/argus/suite.env` in a container. Anything set in the service's own environment wins, and a blank
+value counts as unset. Puppet's own `ARGUS_PUPPET_*` settings are read from the environment only.
+
+`compose.yaml` has the mount as a commented-out line, because compose cannot make a bind mount optional (with no file
+on the host, Docker creates a directory in its place):
+
+```yaml
+    volumes:
+      - ${ARGUS_SUITE_FILE:-/etc/argus/suite.env}:/etc/argus/suite.env:ro
+```
+
+The file is read only when it belongs to the reading user or to root, nobody else can write it, and nobody else can
+read it unless root owns it. The container runs as uid 10001, so a file owned by your own user with mode 600 is not
+readable there: give the container a copy owned by root (mode 444, kept in a directory only root can enter) or owned
+by uid 10001 (mode 600). A file that is missing, unreadable or refused is a warning in the log and no settings, never
+a crash. Values are never logged.
+
+### Discovery labels
+
+Both compose services carry the labels argus-iris's agents read to list the suite's services, and `ARGUS_PEER`
+repeats the first so `GET /health` can report it:
+
+| Label | Value |
+|---|---|
+| `argus.peer` | `puppet`: the name callers ask for (their `ARGUS_PUPPET_URL`) |
+| `argus.service` | `argus-puppet` |
+| `argus.health` | `/health` |
+| `argus.port` | `8220`, the container port |
 
 ## Read-only mode
 
@@ -173,10 +210,10 @@ host, select the coordinator:
 
 | Variable | Meaning |
 |---|---|
-| `ARGUS_GPU_COORDINATOR` | `none` (default, no gating), `lease` (a host-wide file lock plus a free-VRAM wait) or `broker` (argus-iris) |
+| `ARGUS_GPU_COORDINATOR` | Unset: `broker` when `ARGUS_GPU_BROKER_URL` is set, else `none` (no gating). Or name one: `none`, `lease` (a host-wide file lock plus a free-VRAM wait) or `broker` (argus-iris) |
 | `ARGUS_GPU_BROKER_URL` | argus-iris's URL, e.g. `http://<GPU_HOST>:<IRIS_PORT>` |
-| `ARGUS_GPU_BROKER_TOKEN` | The broker token. Keep it in the host's `.env`, never in a committed file |
-| `ARGUS_GPU_TENANT_MANIFEST` | The tenant manifest. The image sets `/app/gpu-tenant.yaml` (this repo's `gpu-tenant.yaml`) |
+| `ARGUS_GPU_BROKER_TOKEN` | The broker token. Keep it in the host's `.env` or the [suite settings file](#the-suite-settings-file), never in a committed file |
+| `ARGUS_GPU_TENANT_MANIFEST` | The tenant manifest. The image sets `/app/gpu-tenant.yaml` (this repo's `gpu-tenant.yaml`); unset, `./gpu-tenant.yaml` then `/app/gpu-tenant.yaml` is used |
 | `ARGUS_GPU_TENANT` | Overrides the tenant name |
 | `ARGUS_GPU_BROKER_FALLBACK` | What to use while the broker cannot be reached: `lease` (default) or `none` |
 | `ARGUS_GPU_LEASE_PATH` | The `lease` coordinator's lock file. Mount one host directory into every GPU service and name the same file in it |
@@ -186,20 +223,24 @@ host, select the coordinator:
 The manifest declares one kind, `pose` (the person detector and the pose model loaded together; about 1600 MB VRAM,
 240 MB of it weights, batch priority, not preemptible). `POST /pose` leases at `interactive` priority unless the
 `X-Argus-Priority` header asks for another class. Folder scans lease at `batch` priority.
-`compose.yaml` lists these variables, commented out, on the `argus-puppet` service.
+`compose.yaml` lists the main ones, commented out, on the `argus-puppet` service. They are read from the environment,
+then from the [suite settings file](#the-suite-settings-file).
+
+Since argus-cortex 0.15 the broker's URL alone selects it: a host that sets `ARGUS_GPU_BROKER_URL` (in the
+environment or the suite file) and leaves `ARGUS_GPU_COORDINATOR` unset now leases through argus-iris, where it used
+to get no gating. Set `ARGUS_GPU_COORDINATOR=none` to keep puppet out of a suite-wide broker.
 
 ### A working broker configuration
 
 In the host's `.env`, beside `compose.yaml`, or as `-e` flags to `docker run`:
 
 ```bash
-ARGUS_GPU_COORDINATOR=broker
 ARGUS_GPU_BROKER_URL=http://<IRIS_HOST>:8120
-ARGUS_GPU_BROKER_FALLBACK=lease
 ARGUS_GPU_BROKER_TOKEN=<IRIS_TOKEN>   # only when argus-iris is run with a token
 ```
 
-The image already sets `ARGUS_GPU_TENANT_MANIFEST=/app/gpu-tenant.yaml`. Puppet registers its tenant (`argus-puppet`)
+The URL and the token are enough: the coordinator defaults to `broker` once the URL is set, the fallback to `lease`,
+and the image already sets `ARGUS_GPU_TENANT_MANIFEST=/app/gpu-tenant.yaml`. Puppet registers its tenant (`argus-puppet`)
 with the broker on its first lease, not at start, so iris lists it only after the first pose request on CUDA. No lease
 is taken while puppet runs on the CPU.
 

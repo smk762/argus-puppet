@@ -31,6 +31,9 @@ DEFAULT_MAX_JSON_BYTES = 128 * 1024 * 1024
 # freed. 60 s carries a full 50 MiB upload at about 1 MB/s.
 DEFAULT_BODY_TIMEOUT_S = 60.0
 DEVICES: tuple[str, ...] = ("auto", "cpu", "cuda")
+# The age check asks argus-curator (POST /faces): puppet's own variable first, then the suite-wide ARGUS_CURATOR_URL.
+AGE_PEER = "curator"
+AGE_URL_VAR = "ARGUS_PUPPET_AGE_URL"
 
 Device = Literal["auto", "cpu", "cuda"]
 
@@ -41,6 +44,19 @@ class ConfigError(ValueError):
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(f"ARGUS_PUPPET_{name}", default).strip()
+
+
+def _age_url() -> str:
+    """argus-curator's base URL for the age check: ``ARGUS_PUPPET_AGE_URL``, else the suite-wide
+    ``ARGUS_CURATOR_URL`` (environment, then the suite file), else unset. ``off`` leaves it unset whatever the suite
+    file says. A value that is set but is not an absolute http(s) URL is a :class:`ConfigError` naming the variable
+    (never the value), not "unset"."""
+    from argus_cortex.peers import PeerRefused, peer_url  # noqa: PLC0415 - keeps `import argus_puppet.config` light
+
+    try:
+        return peer_url(AGE_PEER, AGE_URL_VAR) or ""
+    except PeerRefused as exc:
+        raise ConfigError(str(exc)) from None
 
 
 def _int(name: str, default: int | None) -> int | None:
@@ -94,8 +110,9 @@ class Settings:
     max_set_results: int = DEFAULT_MAX_SET_RESULTS
     max_json_bytes: int = DEFAULT_MAX_JSON_BYTES
     body_timeout_s: float = DEFAULT_BODY_TIMEOUT_S
-    # argus-curator's base URL for the age fail-safe (POST /faces?body=true). Empty: the age check cannot run, and
-    # nothing is ever sent anywhere. Only ever this configured URL, never one a caller supplies.
+    # argus-curator's base URL for the age fail-safe (POST /faces?body=true): ARGUS_PUPPET_AGE_URL, else the suite's
+    # ARGUS_CURATOR_URL. Empty: the age check cannot run, and nothing is ever sent anywhere. Only ever this configured
+    # URL, never one a caller supplies.
     age_url: str = ""
 
     def __post_init__(self) -> None:
@@ -170,5 +187,5 @@ class Settings:
             max_set_results=_int("MAX_SET_RESULTS", DEFAULT_MAX_SET_RESULTS),  # type: ignore[arg-type]
             max_json_bytes=_int("MAX_JSON_BYTES", DEFAULT_MAX_JSON_BYTES),  # type: ignore[arg-type]
             body_timeout_s=_float("BODY_TIMEOUT_S", DEFAULT_BODY_TIMEOUT_S),
-            age_url=_env("AGE_URL"),
+            age_url=_age_url(),
         )

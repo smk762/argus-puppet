@@ -2,7 +2,8 @@
 
 Routes:
 
-* ``GET /health`` -> :class:`~argus_puppet.models.Health`.
+* ``GET /health`` -> cortex's ``ServiceHealth`` with every field of :class:`~argus_puppet.models.Health` beside it
+  (:func:`argus_cortex.service.install_health`).
 * ``POST /pose`` -> :class:`~argus_puppet.models.PoseResult` for one image (raw bytes or a multipart file). Writes
   nothing. ``?name=`` names the image in the result; ``?face=x,y,w,h`` is a primary-face hint. Concurrency is
   bounded (``ARGUS_PUPPET_POSE_CONCURRENCY``): a call past it is answered 503 + Retry-After, not queued.
@@ -49,6 +50,7 @@ from argus_cortex.fs import PathRefused, is_within, safe_basename, safe_join
 from argus_cortex.gpu import GpuCoordinator, free_vram_mb
 from argus_cortex.limits import BadInput, TooLarge, read_body, read_upload
 from argus_cortex.server import WriteGuard, constant_refuse, cross_site_refuse
+from argus_cortex.service import install_health
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
@@ -57,6 +59,7 @@ from argus_puppet import __version__, compare, extract, gpu, metrics, registry, 
 from argus_puppet import estimator as estimator_mod
 from argus_puppet.config import Settings
 from argus_puppet.models import (
+    PUPPET_VERSION,
     BarePose,
     CompareRequest,
     Health,
@@ -70,6 +73,10 @@ from argus_puppet.models import (
     StatsRequest,
 )
 
+# GET /health's `service`: the package name, the same on every host (the `argus.service` compose label).
+SERVICE = "argus-puppet"
+# Health fields that cortex's ServiceHealth also has, with the same meaning and value: the contract supplies them.
+HEALTH_CONTRACT_FIELDS = frozenset({"version", "read_only"})
 READ_ONLY_REFUSAL = "argus-puppet is read-only (ARGUS_PUPPET_READ_ONLY): state-changing requests are refused"
 # A multipart body counts boundaries and part headers too: the whole body (declared or chunked) may be this much over
 # the cap, and read_upload then holds the file itself to the exact cap.
@@ -452,10 +459,22 @@ def create_app(
     app.state.puppet = state
     install_guards(app, settings)
 
-    @app.get("/health", response_model=Health)
-    async def get_health() -> Health:
-        """Model files present and verified, the provider and device, free VRAM, read-only mode."""
-        return await asyncio.to_thread(health, state)
+    async def puppet_health() -> dict[str, Any]:
+        # Off the event loop: it may hash the model files once. `version` and `read_only` are the contract's own
+        # fields (same values), so they are not repeated here.
+        report = await asyncio.to_thread(health, state)
+        return report.model_dump(mode="json", exclude=HEALTH_CONTRACT_FIELDS)
+
+    # GET /health: cortex's ServiceHealth (service, version, status, started_at, wire, read_only, build, peer) with
+    # every field of puppet's Health beside it, so one body validates as both.
+    install_health(
+        app,
+        service=SERVICE,
+        version=__version__,
+        wire={"puppet_version": PUPPET_VERSION},
+        read_only=settings.read_only,
+        extra=puppet_health,
+    )
 
     @app.post("/pose", response_model=PoseResult)
     async def post_pose(

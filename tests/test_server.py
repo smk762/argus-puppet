@@ -37,6 +37,31 @@ def test_health(client) -> None:
     assert h.provider == "FakeExecutionProvider"
 
 
+def test_health_is_the_suite_contract_and_keeps_every_field_it_had(client) -> None:
+    from argus_cortex.service import ServiceHealth
+
+    import argus_puppet
+
+    body = client.get("/health").json()
+    h = ServiceHealth.model_validate(body)
+    assert (h.service, h.version, h.status) == ("argus-puppet", argus_puppet.__version__, "ok")
+    assert h.wire == {"puppet_version": PUPPET_VERSION} and h.read_only is False and h.checks == {}
+    # Every field of puppet's own Health is still there, under the same name.
+    assert set(Health.model_fields) <= set(body)
+    assert body["puppet_version"] == PUPPET_VERSION and body["version"] == argus_puppet.__version__
+    assert {"cuda_unavailable", "last_lease_via", "device", "gpu_coordinator", "models", "provider"} <= set(body)
+    shallow = client.get("/health?checks=0")  # what a container healthcheck or a sibling's probe asks
+    assert shallow.status_code == 200 and Health.model_validate(shallow.json()).device == "cpu"
+
+
+def test_health_reports_read_only_and_the_peer_it_was_told(settings, fake, monkeypatch) -> None:
+    monkeypatch.setenv("ARGUS_PEER", "puppet")
+    app = create_app(dataclasses.replace(settings, read_only=True), estimator=fake, coordinator=RecordingCoordinator())
+    body = TestClient(app).get("/health").json()
+    assert body["read_only"] is True and body["peer"] == "puppet"
+    assert Health.model_validate(body).read_only is True
+
+
 def test_pose_raw_bytes(client, fake) -> None:
     reply = _post(client, draw_image(70, 50))
     assert reply.status_code == 200, reply.text

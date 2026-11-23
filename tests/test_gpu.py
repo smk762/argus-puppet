@@ -149,6 +149,20 @@ def test_a_broker_refusal_is_the_operators_not_a_busy_gpu(cuda, monkeypatch, sta
     assert "s3cret-token" not in message
 
 
+def test_a_broker_token_from_the_suite_file_is_not_echoed_either(cuda, monkeypatch, tmp_path) -> None:
+    suite = tmp_path / "suite.env"
+    suite.write_text("ARGUS_GPU_BROKER_TOKEN=s3cret-file-token\n")
+    suite.chmod(0o600)
+    monkeypatch.setenv("ARGUS_ENV_FILE", str(suite))
+    with (
+        pytest.raises(gpu.OPERATOR_ERRORS) as caught,
+        gpu.lease("cuda", priority="interactive", coordinator=_broker(401)),
+    ):
+        pass
+    exc = type(caught.value)(f"{caught.value} (token s3cret-file-token)")
+    assert "s3cret-file-token" not in gpu.operator_message(exc)
+
+
 def test_an_unreachable_broker_falls_back_rather_than_refusing(cuda) -> None:
     with gpu.lease("cuda", priority="interactive", coordinator=(coord := _broker(503))) as handle:
         assert handle.via == "fallback"

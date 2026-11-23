@@ -14,7 +14,16 @@ x-puppet: &puppet
   restart: unless-stopped
   ports:
     - "${PUPPET_PUBLISH:-127.0.0.1:8220}:8220"
+  # How the suite finds this service (argus-iris's agents read them; argus_cortex.service). `argus.peer` is the name
+  # callers ask for, and both services below carry it: only one of them runs.
+  labels:
+    argus.peer: puppet
+    argus.service: argus-puppet
+    argus.health: /health
+    argus.port: "8220"
   environment: &puppet-env
+    # The argus.peer label again: a process cannot read its own labels, and GET /health reports it as `peer`.
+    ARGUS_PEER: puppet
     ARGUS_PUPPET_MODEL_DIR: /models
     ARGUS_PUPPET_READ_ONLY: ${ARGUS_PUPPET_READ_ONLY:-0}
     ARGUS_PUPPET_CORS_ORIGINS: ${ARGUS_PUPPET_CORS_ORIGINS:-}
@@ -27,6 +36,12 @@ x-puppet: &puppet
     # The data root. Read-only, POST /pose/scan can read images but not write its <stem>.pose.json sidecars; drop
     # the :ro for scans that write. The container runs as uid 10001, which needs read (and for scans, write) access.
     # - ${PUPPET_DATA_DIR:-./data}:/data:ro
+    # The suite settings file (argus_cortex.settings): what every Argus service on the host shares, such as
+    # ARGUS_GPU_BROKER_URL, ARGUS_GPU_BROKER_TOKEN and ARGUS_CURATOR_URL. Commented out because compose cannot make a
+    # bind mount optional: with no file on the host, Docker would create a directory in its place. The container runs
+    # as uid 10001 and reads the file only when root owns it (mode 444 or stricter for others) or uid 10001 does
+    # (mode 600); docs/deploy.md.
+    # - ${ARGUS_SUITE_FILE:-/etc/argus/suite.env}:/etc/argus/suite.env:ro
 
 services:
   puppet:
@@ -53,14 +68,14 @@ services:
       ARGUS_PUPPET_DEVICE: ${ARGUS_PUPPET_DEVICE:-cuda}
       # Cap on each ONNX Runtime CUDA session's arena, in MB (empty: puppet's default).
       ARGUS_PUPPET_GPU_MEM_LIMIT_MB: ${ARGUS_PUPPET_GPU_MEM_LIMIT_MB:-}
-      # Share the card with the rest of the suite through argus-iris, the GPU broker (docs/deploy.md). Unset is
-      # "none": no gating. The token belongs in the host's .env, never in this file.
-      # ARGUS_GPU_COORDINATOR: ${ARGUS_GPU_COORDINATOR:-none}   # none | lease | broker
+      # Share the card with the rest of the suite through argus-iris, the GPU broker (docs/deploy.md): the URL and
+      # the token are enough (argus-cortex 0.15), here or in the suite file mounted above. Neither set: no gating.
+      # The token belongs in the host's .env or the suite file, never in this file.
       # ARGUS_GPU_BROKER_URL: ${ARGUS_GPU_BROKER_URL:-}         # e.g. http://<IRIS_HOST>:8120
       # ARGUS_GPU_BROKER_TOKEN: ${ARGUS_GPU_BROKER_TOKEN:-}
-      # ARGUS_GPU_TENANT_MANIFEST: ${ARGUS_GPU_TENANT_MANIFEST:-/app/gpu-tenant.yaml}
-      # ARGUS_GPU_BROKER_FALLBACK: ${ARGUS_GPU_BROKER_FALLBACK:-lease}
-      # The "lease" coordinator's lock file: mount one host directory into every GPU service (see volumes below).
+      # Without a broker, "lease" is a host-wide lock file: mount one host directory into every GPU service (see
+      # volumes below). "none" turns gating off even when the suite file names a broker.
+      # ARGUS_GPU_COORDINATOR: ${ARGUS_GPU_COORDINATOR:-}       # unset | none | lease | broker
       # ARGUS_GPU_LEASE_PATH: /run/argus-gpu/argus-gpu.lock
       # ARGUS_GPU_LEASE_TIMEOUT_S: ${ARGUS_GPU_LEASE_TIMEOUT_S:-300}
     # For ARGUS_GPU_COORDINATOR=lease, add the shared lock directory:
