@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import tracemalloc
+
 import numpy as np
 import pytest
 
@@ -21,6 +23,23 @@ def test_euclidean_distances() -> None:
     assert np.isnan(d[2]).all() and np.isnan(d[:, 2]).all()
     with pytest.raises(ValueError):
         euclidean_distances(np.zeros(3))
+
+
+def test_euclidean_distances_memory_does_not_grow_with_the_dimension(monkeypatch: pytest.MonkeyPatch) -> None:
+    x = np.random.default_rng(0).normal(size=(200, 266))
+    x[7, 3] = np.nan
+    tracemalloc.start()
+    try:
+        d = euclidean_distances(x)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 40_000_000  # the full (n, n, dim) difference alone is 85 MB
+    for block in (1, 100_000, 10**9):  # one row, a few rows, all rows at once
+        monkeypatch.setattr("argus_puppet.sampling._CHUNK_ELEMENTS", block)
+        np.testing.assert_array_equal(euclidean_distances(x), d)
+    assert euclidean_distances(np.zeros((0, 3))).shape == (0, 0)
+    assert euclidean_distances(np.zeros((2, 0))).tolist() == [[0.0, 0.0], [0.0, 0.0]]
 
 
 # ── dedupe ───────────────────────────────────────────────────────────────────────────────────────────────────────

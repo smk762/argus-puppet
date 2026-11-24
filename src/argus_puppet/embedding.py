@@ -351,17 +351,31 @@ def handedness(coords: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return np.where(np.abs(first) > _HANDEDNESS_EPS, first, second)
 
 
+def _tie_key(c: np.ndarray, m: np.ndarray) -> np.ndarray:
+    """``(..., 51)``: the mask, then the coordinates of the confident joints (a masked joint's carry no meaning)."""
+    return np.concatenate([m.astype(np.float64), np.where(m[..., None], c, 0.0).reshape(*m.shape[:-1], -1)], axis=-1)
+
+
+def _lex_less(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Whether each row of *a* sorts before the same row of *b*. ``(..., K)`` -> ``(...)``."""
+    differs = a != b
+    first = differs.argmax(axis=-1)[..., None]
+    return np.take_along_axis(a < b, first, axis=-1)[..., 0]
+
+
 def canonicalize(coords: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """A deterministic choice between each pose and its mirror image: the one whose :func:`handedness` is not
     negative (a pose with weight on its right side in the image is mirrored). Works on ``(17, 2)`` or batches.
 
-    Mirror-invariant: ``canonicalize(*mirror(c, m))`` equals ``canonicalize(c, m)`` unless both criteria tie, which
-    a real pose does only when it is (numerically) its own mirror image.
+    Mirror-invariant: ``canonicalize(*mirror(c, m))`` equals ``canonicalize(c, m)``. When handedness ties (a pose
+    with every confident joint on the midline, say, or one that is numerically its own mirror image) the
+    lexicographically smaller of the two (mask, then coordinates) is taken.
     """
     c = np.asarray(coords, dtype=np.float64)
     m = np.asarray(mask, dtype=bool)
     mc, mm = mirror(c, m)
-    flip = handedness(c, m) < -_HANDEDNESS_EPS
+    h = handedness(c, m)
+    flip = np.where(np.abs(h) > _HANDEDNESS_EPS, h < 0, _lex_less(_tie_key(mc, mm), _tie_key(c, m)))
     return np.where(flip[..., None, None], mc, c), np.where(flip[..., None], mm, m)
 
 
@@ -396,10 +410,13 @@ def masked_mean(coords: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.nd
 
 
 def _to_template(c: np.ndarray, m: np.ndarray, t: np.ndarray, tm: np.ndarray) -> np.ndarray:
+    """Weighted mean joint distance of each ``(..., 17, 2)`` pose to the template, over the joints confident in both:
+    ``inf`` when they share none, so a pose that cannot be compared is never the nearer one."""
     shared = m & tm
     w = JOINT_WEIGHTS * shared
     d = np.linalg.norm(c - t, axis=-1)
-    return (w * d).sum(axis=-1) / np.maximum(w.sum(axis=-1), 1e-12)
+    total = w.sum(axis=-1)
+    return np.where(total > 0, (w * d).sum(axis=-1) / np.maximum(total, 1e-12), np.inf)
 
 
 # ── distance ─────────────────────────────────────────────────────────────────────────────────────────────────────

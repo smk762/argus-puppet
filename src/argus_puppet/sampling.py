@@ -31,6 +31,9 @@ __all__ = [
 DistanceFn = Callable[[int, int], float]
 DistanceSource = np.ndarray | DistanceFn
 
+# Values per temporary array of euclidean_distances (8 MB of float64).
+_CHUNK_ELEMENTS = 1_000_000
+
 
 class _Rows:
     """Row access to a distance matrix or callable, with unusable entries (and the diagonal) as NaN."""
@@ -70,14 +73,19 @@ class _Rows:
 
 def euclidean_distances(vectors: np.ndarray) -> np.ndarray:
     """Pairwise Euclidean distances between the rows of an ``(n, d)`` array. A row with any non-finite value is
-    unusable: its distances are NaN (the diagonal is 0 for usable rows)."""
+    unusable: its distances are NaN (the diagonal is 0 for usable rows). Computed in row blocks, so the working memory
+    stays around :data:`_CHUNK_ELEMENTS` values (or one ``(n, d)`` row block, if larger) beyond the result."""
     x = np.asarray(vectors, dtype=np.float64)
     if x.ndim != 2:
         raise ValueError(f"expected an (n, d) array, got shape {x.shape}")
     ok = np.isfinite(x).all(axis=1)
     safe = np.where(ok[:, None], x, 0.0)
-    diff = safe[:, None, :] - safe[None, :, :]
-    d = np.sqrt((diff * diff).sum(axis=-1))
+    n = len(safe)
+    d = np.empty((n, n), dtype=np.float64)
+    step = max(1, _CHUNK_ELEMENTS // max(safe.size, 1))
+    for start in range(0, n, step):
+        diff = safe[start : start + step, None, :] - safe[None, :, :]
+        d[start : start + step] = np.sqrt((diff * diff).sum(axis=-1))
     d[~ok, :] = np.nan
     d[:, ~ok] = np.nan
     return d
