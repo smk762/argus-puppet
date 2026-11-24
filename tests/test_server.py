@@ -335,9 +335,12 @@ def test_the_module_level_app_is_built_from_the_environment(monkeypatch, tmp_pat
 
     monkeypatch.setenv("ARGUS_PUPPET_MODEL_DIR", str(tmp_path))
     monkeypatch.delitem(mod.__dict__, "app", raising=False)
-    app = mod.app
-    assert app.state.puppet.settings.model_dir == tmp_path
-    monkeypatch.delitem(mod.__dict__, "app")
+    try:
+        app = mod.app
+        assert app.state.puppet.settings.model_dir == tmp_path
+    finally:
+        # Not monkeypatch.delitem: it would record this app and put it back at teardown.
+        mod.__dict__.pop("app", None)
 
 
 # ── device truth and broker refusals ────────────────────────────────────────────────────────────────────────────

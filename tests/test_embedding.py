@@ -331,6 +331,39 @@ def test_canonicalize_is_mirror_invariant() -> None:
         assert np.allclose(a[0], b[0]) and np.array_equal(a[1], b[1]), name
 
 
+def test_canonicalize_is_mirror_invariant_when_handedness_ties() -> None:
+    masked = np.zeros((17, 2)), np.zeros(17, dtype=bool)
+    masked[0][:, 1] = np.arange(17.0)  # every joint on the midline, only the left side confident
+    masked[1][[Joint.NOSE, Joint.LEFT_WRIST, Joint.LEFT_HIP]] = True
+    crossed = np.zeros((17, 2)), np.ones(17, dtype=bool)  # +x and -x joints at one height balance out, asymmetrically
+    crossed[0][[Joint.LEFT_WRIST, Joint.LEFT_ANKLE], 0] = 1.0, -1.0
+    crossed[0][:, 1] = 0.5
+    coords, mask = (np.stack(parts) for parts in zip(masked, crossed, strict=True))
+    a, am = canonicalize(coords, mask)
+    b, bm = canonicalize(*mirror(coords, mask))
+    assert np.array_equal(am, bm) and np.array_equal(a, b)
+    for k in range(2):  # one pose at a time agrees with the batch
+        one, one_mask = canonicalize(coords[k], mask[k])
+        assert np.array_equal(one, a[k]) and np.array_equal(one_mask, am[k])
+
+
+def test_align_to_mean_never_flips_to_an_orientation_sharing_no_joint_with_the_mean() -> None:
+    """Profiles with only their left joints confident: the mirror has only right ones, so it shares none with the mean
+    and is incomparable, not a perfect match."""
+    left = [j for j in range(17) if BODY_FLIP[j] > j]
+    rng = np.random.default_rng(6)
+    coords, mask = np.zeros((4, 17, 2)), np.zeros((4, 17), dtype=bool)
+    coords[:, left] = rng.normal(0, 0.05, (4, len(left), 2)) - (1.0, 0.0)
+    mask[:, left] = True
+    start, start_mask = canonicalize(coords, mask)
+    for iterations in (1, 2):
+        c, m = align_to_mean(coords, mask, iterations=iterations)
+        assert np.array_equal(m, start_mask) and np.array_equal(c, start)
+    template = np.zeros((17, 2))
+    d = embedding._to_template(coords, mask, template, ~mask[0])
+    assert np.isinf(d).all()
+
+
 def test_align_to_mean_is_order_independent_and_mirror_invariant() -> None:
     rng = np.random.default_rng(5)
     vs = [vec("wave", rng=rng, angle_jitter=8, mirror=bool(rng.integers(2))) for _ in range(12)]

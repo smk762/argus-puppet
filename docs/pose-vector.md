@@ -156,7 +156,8 @@ every pose in one orientation first.
 
 - `canonicalize(v)` picks between `v` and `mirror(v)` the one whose **handedness** is not negative. Handedness is the
   weighted mean x of the confident joints (it changes sign under `mirror`); when that is zero the weighted mean of
-  `x * y` decides. A pose that ties on both is numerically its own mirror image, so the choice does not matter.
+  `x * y` decides. When both tie, the lexicographically smaller of the two (mask, then coordinates) is taken, so the
+  choice never depends on which of the pair came in.
 - `align_to_mean(set)` starts from `canonicalize` and then repeatedly flips each pose to whichever orientation is
   nearer the set's masked mean pose (up to five rounds). Near-symmetric poses can fall either side of the per-pose
   rule; aligning to the mean puts jittered copies of one pose on the same side. It depends only on the set, not its
