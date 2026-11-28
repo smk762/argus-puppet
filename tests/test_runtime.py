@@ -83,6 +83,7 @@ def test_the_hash_memo_is_invalidated_by_any_change_to_the_file(pinned, monkeypa
     """The memo (health, models verify) is keyed on path, device, inode, size, mtime and ctime: every rewrite below
     keeps the size, so only the other parts of the key can notice it."""
     s, name = pinned
+    monkeypatch.setattr(runtime, "_RACY_NS", 0)  # memoise the file just written: this test moves its stamps itself
     path = s.model_path(name)
     size = path.stat().st_size
     first = runtime.file_sha256(path)
@@ -110,6 +111,25 @@ def test_the_hash_memo_is_invalidated_by_any_change_to_the_file(pinned, monkeypa
     os.utime(swapped, ns=(st.st_atime_ns, st.st_mtime_ns))
     os.replace(swapped, path)
     assert runtime.file_sha256(path) == want[b"C"] and calls == [1, 1, 1]
+
+
+def test_a_file_changed_within_one_clock_tick_is_not_memoised(pinned, monkeypatch) -> None:
+    """File stamps come from a coarse clock: two same-size writes in one tick share every part of the key (the key is
+    pinned here, so the test doesn't depend on the kernel's tick). A memo taken between them would vouch for the first
+    bytes, so a file that recent is hashed every time; once it has been still for the window, it is memoised."""
+    s, name = pinned
+    path = s.model_path(name)
+    size = path.stat().st_size
+    monkeypatch.setattr(runtime, "_stat_key", lambda p: ("same", 0, 0, size, time.time_ns(), time.time_ns()))
+    runtime.file_sha256(path)
+    path.write_bytes(b"Z" * size)
+    assert runtime.file_sha256(path) == hashlib.sha256(b"Z" * size).hexdigest()
+
+    old = time.time_ns() - runtime._RACY_NS
+    monkeypatch.setattr(runtime, "_stat_key", lambda p: ("still", 0, 0, size, old, old))
+    first = runtime.file_sha256(path)
+    calls = _counting_sha256(monkeypatch)
+    assert runtime.file_sha256(path) == first and calls == []
 
 
 def test_load_session_hashes_the_bytes_it_loads(pinned, monkeypatch) -> None:
