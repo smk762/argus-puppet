@@ -8,7 +8,8 @@ are not the pinned ones is refused, never run. A load reads the file once, hashe
 bytes to ONNX Runtime, so nothing can change between the check and the load, and no memo vouches for it. (The 134 MB
 pose model is then held twice for a moment, as Python bytes and as ORT parses them; the bytes are dropped once the
 session is built.) ``GET /health`` and ``models verify`` only ask whether a file verifies: their hashes are memoised
-by path, device, inode, size, mtime and ctime, so a file is hashed once per process and again after any change.
+by path, device, inode, size, mtime and ctime, so a file is hashed once per process and again after any change. A file
+changed in the last 100 ms is not memoised: its time stamps can't yet tell it from a rewrite in the same clock tick.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import ctypes
 import hashlib
 import sys
 import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -231,6 +233,12 @@ def _stat_key(path: Path) -> tuple[str, int, int, int, int, int]:
     return (str(path.resolve()), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
+# A file changed this recently is hashed but not memoised. File time stamps come from a coarse clock (a kernel tick,
+# not the nanoseconds they show), so a second same-size write within the same tick keeps every part of the key, and a
+# memo taken between the two would vouch for bytes that are gone. Git skips its "racily clean" entries the same way.
+_RACY_NS = 100_000_000
+
+
 def file_sha256(path: Path) -> str:
     """SHA-256 of *path* (lower-case hex), memoised by its :func:`_stat_key` (for checks that load nothing)."""
     key = _stat_key(path)
@@ -243,8 +251,9 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     digest = h.hexdigest()
-    with _hash_lock:
-        _hash_cache[key] = digest
+    if time.time_ns() - max(key[4], key[5]) >= _RACY_NS:
+        with _hash_lock:
+            _hash_cache[key] = digest
     return digest
 
 
