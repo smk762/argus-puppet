@@ -74,11 +74,19 @@ def test_pose_json(monkeypatch, tmp_path) -> None:
     assert body["skipped"] == {"exists": 1} and body["written"] == 0
 
 
+def _exited_cleanly(result) -> bool:
+    """CliRunner reports an unhandled exception as exit code 1 too: a deliberate exit leaves none (or SystemExit)."""
+    return result.exception is None or isinstance(result.exception, SystemExit)
+
+
 def test_pose_exits_non_zero_when_nothing_could_be_processed(monkeypatch, tmp_path) -> None:
     _fake_estimator(monkeypatch)
-    assert runner.invoke(app, ["pose", str(tmp_path)]).exit_code == 1  # no images
+    result = runner.invoke(app, ["pose", str(tmp_path)])  # no images
+    assert result.exit_code == 1 and _exited_cleanly(result), result.output
     (tmp_path / "bad.png").write_bytes(b"junk")
-    assert runner.invoke(app, ["pose", str(tmp_path)]).exit_code == 1  # every image failed
+    result = runner.invoke(app, ["pose", str(tmp_path)])  # every image failed
+    assert result.exit_code == 1 and _exited_cleanly(result), result.output
+    assert "unreadable" in result.output
 
 
 def test_pose_reports_unwritable_sidecars_and_exits_non_zero(monkeypatch, tmp_path) -> None:
@@ -316,6 +324,16 @@ def test_render_a_sidecar_a_folder_and_an_image(monkeypatch, tmp_path) -> None:
     assert runner.invoke(app, ["render", str(photo), "--out", str(tmp_path), "--stroke-scale", "big"]).exit_code == 1
 
 
+def test_render_a_write_that_fails_is_that_items_failure_and_the_rest_still_render(tmp_path) -> None:
+    folder = _sidecar_folder(tmp_path / "set", SET[:3])
+    out = tmp_path / "controls"
+    (out / "00_standing.openpose.png").mkdir(parents=True)  # a directory where the first control image would go
+    result = runner.invoke(app, ["render", str(folder), "--out", str(out)])
+    assert result.exit_code == 1 and _exited_cleanly(result), result.output
+    assert "failed" in result.output and "00_standing" in result.output
+    assert (out / "01_t_pose.openpose.png").is_file() and (out / "02_arms_up.openpose.png").is_file()
+
+
 def test_library_build_and_sample(tmp_path) -> None:
     from PIL import Image
 
@@ -428,8 +446,12 @@ def test_threshold_defaults_match_the_library(tmp_path, monkeypatch) -> None:
     folder = _sidecar_folder(tmp_path / "set", SET)
     assert runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "l.json")]).exit_code == 0
     assert seen["dedupe_threshold"] == library.DEFAULT_DEDUPE_THRESHOLD
-    runner.invoke(app, ["library", "build", str(folder), "--out", str(tmp_path / "l.json"), "--dedupe-threshold", "0"])
-    assert seen["dedupe_threshold"] is None
+    seen.clear()
+    result = runner.invoke(
+        app, ["library", "build", str(folder), "--out", str(tmp_path / "l.json"), "--dedupe-threshold", "0"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "dedupe_threshold" in seen and seen["dedupe_threshold"] is None
 
 
 def test_pose_with_a_broker_refusal_says_it_is_the_operators(monkeypatch, tmp_path, cuda) -> None:

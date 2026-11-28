@@ -518,12 +518,16 @@ def render(
             continue
         if single_file:
             target = out
-            target.parent.mkdir(parents=True, exist_ok=True)
         else:
             rel = path.parent.relative_to(base) if path.is_relative_to(base) else Path()
             target = out / rel / (_stem(path) + CONTROL_SUFFIX)
+        try:
             target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(png)
+            target.write_bytes(png)
+        except OSError as exc:  # a write that fails is this item's failure, like a read: the rest still render
+            typer.echo(f"failed {path}: {exc}", err=True)
+            failed += 1
+            continue
         written += 1
         typer.echo(f"wrote {target}")
     if failed or not written:

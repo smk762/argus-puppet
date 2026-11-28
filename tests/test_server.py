@@ -77,6 +77,9 @@ def test_pose_octet_stream_and_no_content_type(client) -> None:
         client.post("/pose", content=draw_image(), headers={"content-type": "application/octet-stream"}).status_code
         == 200
     )
+    reply = client.post("/pose", content=draw_image())  # raw bytes with no Content-Type at all
+    assert "content-type" not in reply.request.headers
+    assert reply.status_code == 200, reply.text
 
 
 def test_pose_multipart_takes_the_filename(client) -> None:

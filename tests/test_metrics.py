@@ -303,9 +303,15 @@ def test_tied_clusters_do_not_depend_on_input_order_once_sorted() -> None:
 
 
 def test_average_linkage_never_joins_an_incomparable_pair() -> None:
+    # 0-1 and 1-2 tie, so either may merge first: the property is that 0 and 2 never share a cluster and that
+    # node 1 joins exactly one of them (the merge the threshold allows), whichever way the tie is broken.
     d = np.array([[0, 0.1, np.nan], [0.1, 0, 0.1], [np.nan, 0.1, 0]])
     labels = average_linkage(d, 1.0)
-    assert labels[0] == labels[1] and labels[2] != labels[0]
+    assert labels[0] != labels[2]
+    assert (labels[1] == labels[0]) != (labels[1] == labels[2])
+    # Without the tie, the closer pair is the one that merges.
+    labels = average_linkage(np.array([[0, 0.2, np.nan], [0.2, 0, 0.1], [np.nan, 0.1, 0]]), 1.0)
+    assert labels[1] == labels[2] and labels[0] != labels[1]
 
 
 def test_cluster_threshold_is_read_from_params() -> None:

@@ -277,6 +277,17 @@ def test_a_symlink_out_of_the_fence_is_skipped(settings, fake, tmp_path) -> None
     assert {o.image: o.reason for o in summary.outcomes} == {"link.png": "outside_root", "ok.png": None}
 
 
+def test_a_fenced_out_image_claims_no_sidecar_from_its_in_fence_sibling(settings, fake, tmp_path) -> None:
+    """``a.jpg`` (a symlink out of the fence) sorts before ``a.png``: it is never posed, so ``a.png`` gets the sidecar."""
+    outside = _write(tmp_path / "outside" / "secret.png", draw_image())
+    root = tmp_path / "fenced"
+    _write(root / "a.png", draw_image())
+    os.symlink(outside, root / "a.jpg")
+    summary = extract.scan(root, settings=settings, estimator=fake, fence=root)
+    assert {o.image: o.reason for o in summary.outcomes} == {"a.jpg": "outside_root", "a.png": None}
+    assert summary.written == 1 and (root / "a.pose.json").is_file()
+
+
 def test_scan_summarises(settings, fake, folder) -> None:
     (folder / "a.pose.json").write_text("{}")
     _write(folder / "z.png", b"junk")
