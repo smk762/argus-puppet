@@ -40,7 +40,7 @@ from argus_puppet import gpu
 from argus_puppet.config import Settings
 from argus_puppet.estimator import to_rgb
 from argus_puppet.labels import pose_labels
-from argus_puppet.models import SKIP_MAX_IMAGES, ImageOutcome, PoseResult, ScanSummary, sidecar_path
+from argus_puppet.models import SKIP_MAX_IMAGES, ImageOutcome, PoseResult, RenderOptions, ScanSummary, sidecar_path
 from argus_puppet.primary import BoxXYWH, assign_primary
 
 log = structlog.get_logger(__name__)
@@ -151,6 +151,37 @@ def pose_image(
     with gpu.lease(device or settings.device, priority=priority, coordinator=coordinator, caller="image"):
         est = _resolve_estimator(settings, estimator, device)
         return build_result(decoded, name=name or default_name, sha256=digest, estimator=est, face_hint=face_hint)
+
+
+class NobodyFound(ValueError):
+    """The image holds nobody to draw: a control image of it would be black and steer a generator towards nothing."""
+
+
+def control_image(
+    image: bytes | str | os.PathLike[str],
+    options: RenderOptions | None = None,
+    *,
+    max_pixels: int | None = None,
+    **pose_kwargs: object,
+) -> tuple[bytes, PoseResult]:
+    """An image straight to its OpenPose-convention control PNG: :func:`pose_image`, then ``render.render_png``.
+
+    Returns the PNG and the :class:`PoseResult` it was drawn from (keep it: it is the skeleton, and it names the
+    estimator). *pose_kwargs* go to :func:`pose_image` (``name``, ``settings``, ``estimator``, ``face_hint``,
+    ``priority``, ``coordinator``). Raises what :func:`pose_image` raises, :class:`NobodyFound` when there is nobody
+    to draw (nobody in the image, or no primary subject with ``options.primary_only``), and
+    :class:`~argus_cortex.limits.TooLarge` when the canvas would be over *max_pixels*.
+    """
+    from argus_puppet import render
+
+    options = options or RenderOptions()
+    result = pose_image(image, **pose_kwargs)  # type: ignore[arg-type]
+    if not result.people or (options.primary_only and result.primary is None):
+        raise NobodyFound("nobody was found in the image, so there is no pose to draw")
+    w, h = render.canvas_size((result.width, result.height), options)
+    if max_pixels is not None and w * h > max_pixels:
+        raise TooLarge(f"a {w}x{h} canvas", max_pixels, unit="pixels")
+    return render.render_png(result, options), result
 
 
 # ── a folder ─────────────────────────────────────────────────────────────────────────────────────────────────────

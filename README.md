@@ -21,7 +21,8 @@ write guards, GPU leases) comes from argus-cortex.
 | **Extract** | A `PoseResult` per image: every person's box, 133 keypoints with scores, the primary subject, and the SHA-256 of the models that ran. Saved as a `<stem>.pose.json` sidecar beside the image | `pose` | `POST /pose`, `POST /pose/scan` |
 | **Measure** | `PoseSetStats`: a diversity score, clusters of similar poses, and coverage counts by stance, arms and facing | `stats` | `POST /stats` |
 | **Compare** | `PoseSetComparison`: each output's nearest reference (training) pose, the share of close pose matches against the training set's own baseline, and how far the pose mix drifted | `compare` | `POST /compare` |
-| **Condition** | OpenPose-convention skeleton PNGs for pose ControlNets, and a pose library you can sample diverse poses from | `render`, `library build`, `library sample` | `POST /render` |
+| **Condition** | OpenPose-convention skeleton PNGs for pose ControlNets, from keypoints or straight from an image, and a pose library you can sample diverse poses from | `render`, `library build`, `library sample` | `POST /render`, `POST /control` |
+| **Verify** | `PoseAdherence`: whether a generated image holds the pose it was asked for (each target person's distance to their match, and whether the figure came out mirrored) | `adherence` | `POST /adherence` |
 
 ## Install
 
@@ -65,7 +66,10 @@ argus-puppet compare ~/datasets/outputs ~/datasets/example --extract
 # 5. Draw ControlNet skeletons at the generation size: control/<stem>.openpose.png
 argus-puppet render ~/datasets/example --out control --width 1024 --height 1024 --stroke-scale auto
 
-# 6. Build a pose library, then pick 8 mutually distant poses and render them
+# 6. Did the generator hold the pose? Exit 1 when it did not
+argus-puppet adherence ~/datasets/example/photo.pose.json generated.png
+
+# 7. Build a pose library, then pick 8 mutually distant poses and render them
 argus-puppet library build ~/datasets/example --out poses.library.json --created-from "CC0 photos of adults"
 argus-puppet library sample poses.library.json -n 8 --render-dir batch --size 1024x1024
 ```

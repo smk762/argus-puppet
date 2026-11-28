@@ -7,11 +7,12 @@ publishes it on the host's loopback (see [deploy.md](deploy.md)). The app is `ar
 
 Every request and response body is a type from `src/argus_puppet/models.py`, the wire contract. Its field
 descriptions are authoritative and are rendered to `schema/puppet-wire.schema.json`. Top-level documents carry
-`puppet_version` (currently `"1.3"`); a 1.x reader ignores fields it does not know, and every 1.x reader accepts a
+`puppet_version` (currently `"1.4"`); a 1.x reader ignores fields it does not know, and every 1.x reader accepts a
 1.0 document. 1.1 added `PersonPose.labels` (see [`POST /pose`](#post-pose)). 1.2 added why a pose is unusable:
 `unusable_reason` on `/stats` items and `/compare` matches, with counts by reason beside them (see
 [`POST /stats`](#post-stats)). 1.3 added `cuda_unavailable` and `last_lease_via` to
-[`GET /health`](#get-health), whose `device` now says where work really runs.
+[`GET /health`](#get-health), whose `device` now says where work really runs. 1.4 added
+[`POST /adherence`](#post-adherence) and its `PoseAdherence` document; no existing document changed.
 
 ## Routes
 
@@ -23,9 +24,11 @@ descriptions are authoritative and are rendered to `schema/puppet-wire.schema.js
 | `POST /stats` | `StatsRequest` (JSON) | `PoseSetStats` | nothing |
 | `POST /compare` | `CompareRequest` (JSON) | `PoseSetComparison` | nothing |
 | `POST /render` | `RenderRequest` (JSON) | `image/png` | nothing |
+| `POST /control` | one image (raw bytes or multipart), options in the query | `image/png` | nothing |
+| `POST /adherence` | `AdherenceRequest` (JSON) | `PoseAdherence` | nothing |
 
 Errors are FastAPI's `{"detail": ...}`: a string, or for validation errors (422) a list of
-`{type, loc, msg}` entries. Puppet's JSON routes (`/pose/scan`, `/stats`, `/compare`, `/render`) never echo the
+`{type, loc, msg}` entries. Puppet's JSON routes (`/pose/scan`, `/stats`, `/compare`, `/render`, `/adherence`) never echo the
 input back in a 422.
 
 ### `GET /health`
@@ -304,15 +307,81 @@ jq -n --slurpfile p photo.pose.json '{pose: $p[0], options: {width: 1024, height
 | 413 | The body is over 4 MiB (one pose of 500 people fits in 2 MB), the canvas is over `ARGUS_PUPPET_MAX_PIXELS`, or more people would be drawn than `ARGUS_PUPPET_MAX_PEOPLE` |
 | 422 | The body is not a valid `RenderRequest`, or the pose cannot be drawn |
 
+### `POST /control`
+
+One image straight to its control PNG: `/pose` and then `/render`, in one call. Use it when the control image is all
+you need. A caller that also wants the keypoints (to record the skeleton, or to check adherence afterwards) calls
+`/pose` and `/render` itself.
+
+The body is `/pose`'s: the image as raw bytes or a multipart file. The render options are query parameters:
+
+| Query | Meaning |
+|---|---|
+| `draw` | Parts to draw, comma separated: `body`, `hands`, `face`. Default all three |
+| `width`, `height` | Canvas size, 1 to 8192. Default the image's size; one alone keeps the image's aspect |
+| `fit` | `contain` (default), `cover`, `stretch` or `skeleton` ([conditioning.md](conditioning.md#sizing-and-aspect)) |
+| `primary_only` | `true` draws only the primary person |
+| `min_score` | Visibility threshold, default 0.3 |
+| `stroke_scale` | A number, or `auto` (the default) |
+| `face` | The primary-face hint `x,y,w,h`, as for `/pose` |
+| `name` | A file name; only checked |
+
+`X-Argus-Priority` sets the GPU lease class, as for `/pose`. The response header `X-Argus-Puppet-People` says how
+many people were drawn.
+
+```bash
+curl -s -X POST -H 'content-type: image/jpeg' --data-binary @photo.jpg -o photo.openpose.png \
+  'http://<PUPPET_HOST>:8220/control?width=1024&height=1024&draw=body,hands'
+```
+
+| Status | When |
+|---|---|
+| 200 | `image/png` |
+| 400 | A query parameter is wrong (the answer names it and never repeats its value), the body is empty, or the image could not be decoded |
+| 408, 413, 415, 503 | As for `/pose`; also 413 when the canvas is over `ARGUS_PUPPET_MAX_PIXELS` |
+| 422 | Nobody was found in the image (or no primary subject with `primary_only`): a black control image would steer a generator towards nothing, so none is sent. Also `width` or `height` out of range |
+
+### `POST /adherence`
+
+Whether a generated image holds the pose it was asked for. Send the target pose (the one the control image was drawn
+from) and the pose `/pose` found in the generated image:
+
+```json
+{"target": {"keypoints": [[x, y, score], "... 133"], "width": 853, "height": 1280},
+ "output": {"puppet_version": "1.4", "image": "out.png", "...": "a whole PoseResult"},
+ "threshold": 0.25, "primary_only": false}
+```
+
+`target` and `output` are each a whole `PoseResult` or bare keypoints with their frame, as for `/render`.
+`threshold` (default 0.25), `primary_only` (default false: every person is compared) and `params` (a
+`MetricParams`) are optional. The answer is a `PoseAdherence`:
+
+```json
+{"adheres": false, "threshold": 0.25, "primary_only": false,
+ "target_people": 1, "output_people": 1, "comparable": 1, "matched": 1, "close": 0,
+ "distance": 0.41, "mean_distance": 0.41,
+ "matches": [{"target": 0, "output": 0, "distance": 0.41, "mirrored_distance": 0.0, "shared_joints": 17,
+              "close": false, "mirrored": true, "unusable_reason": null}]}
+```
+
+How the people are matched, what the distance is and what the default threshold means are in
+[conditioning.md](conditioning.md#checking-the-result-pose-adherence).
+
+| Status | When |
+|---|---|
+| 200 | A `PoseAdherence`, whatever the verdict |
+| 413 | The body is over 8 MiB, or either pose holds more people than `ARGUS_PUPPET_MAX_PEOPLE` |
+| 422 | The body is not a valid `AdherenceRequest` |
+
 ### Errors common to the JSON routes
 
-`/stats`, `/compare` and `/render` read their body themselves (`/pose/scan` too, with its own 16 KiB cap):
+`/stats`, `/compare`, `/render` and `/adherence` read their body themselves (`/pose/scan` too, with its own 16 KiB cap):
 
 | Status | When |
 |---|---|
 | 400 | The body could not be read (for example a malformed `Content-Length`) |
 | 408 | The body did not arrive within `ARGUS_PUPPET_BODY_TIMEOUT_S` (default 60 s) |
-| 413 | The body is larger than `ARGUS_PUPPET_MAX_JSON_BYTES` (default 128 MiB; 4 MiB for `/render`), a set is over the set cap, or the body holds more people than its size allows |
+| 413 | The body is larger than `ARGUS_PUPPET_MAX_JSON_BYTES` (default 128 MiB; 4 MiB for `/render`, 8 MiB for `/adherence`), a set is over the set cap, or the body holds more people than its size allows |
 | 415 | `Content-Type` is present and is not `application/json` |
 | 422 | The body is not valid JSON for the route's model |
 | 503 | Busy (see below) |
@@ -334,8 +403,8 @@ and the client should retry.
 
 | Routes | Bound |
 |---|---|
-| `POST /pose` | `ARGUS_PUPPET_POSE_CONCURRENCY` calls at once (default 2) |
-| `POST /stats`, `/compare`, `/render` | A separate pool of the same size, shared by the three |
+| `POST /pose`, `/control` | `ARGUS_PUPPET_POSE_CONCURRENCY` calls at once (default 2), shared by the two |
+| `POST /stats`, `/compare`, `/render`, `/adherence` | A separate pool of the same size, shared by the four |
 | `POST /pose/scan` | One scan at a time |
 
 A call holds its slot while its body arrives, so the body read has a deadline: `ARGUS_PUPPET_BODY_TIMEOUT_S`
@@ -371,7 +440,7 @@ Three guards stand in front of the routes (a request meets the read-only guard b
    server-to-server calls, the sibling packages) pass. A `*` in `ARGUS_PUPPET_CORS_ORIGINS` lets any page read
    answers but never write; name an origin to let a page post.
 2. **Read-only mode.** With `ARGUS_PUPPET_READ_ONLY=1` every `POST` is refused with 403, including `POST /pose`,
-   `/stats`, `/compare` and `/render`, which write nothing. Only `GET /health` (and the OpenAPI pages) answer.
+   `/stats`, `/compare`, `/render`, `/control` and `/adherence`, which write nothing. Only `GET /health` (and the OpenAPI pages) answer.
 3. **The data root.** Routes that take a path (`/pose/scan`, and `/stats` and `/compare` given a `path`) resolve it
    under `ARGUS_PUPPET_DATA_ROOT` and refuse anything outside it, including `..` and absolute paths. Files that
    resolve outside the root through a symlink are skipped. With no data root these routes refuse every path (409).
@@ -392,10 +461,10 @@ depend on:
 | `ARGUS_PUPPET_READ_ONLY` | off | every `POST` |
 | `ARGUS_PUPPET_CORS_ORIGINS`, `ARGUS_PUPPET_TRUSTED_HOSTS` | none | the origin guard |
 | `ARGUS_PUPPET_MAX_UPLOAD_BYTES` | 52428800 (50 MiB) | `/pose`, and each image of a scan |
-| `ARGUS_PUPPET_MAX_PIXELS` | 40000000 | `/pose`, scans, `/render` canvases |
-| `ARGUS_PUPPET_MAX_PEOPLE` | 20 | people kept per image; people drawn by `/render` |
+| `ARGUS_PUPPET_MAX_PIXELS` | 40000000 | `/pose`, `/control`, scans, `/render` and `/control` canvases |
+| `ARGUS_PUPPET_MAX_PEOPLE` | 20 | people kept per image; people drawn by `/render`; people per pose of `/adherence` |
 | `ARGUS_PUPPET_MAX_SCAN_IMAGES` | 2000 | `/pose/scan` |
-| `ARGUS_PUPPET_POSE_CONCURRENCY` | 2 | `/pose`; separately, `/stats` + `/compare` + `/render` |
+| `ARGUS_PUPPET_POSE_CONCURRENCY` | 2 | `/pose` + `/control`; separately, `/stats` + `/compare` + `/render` + `/adherence` |
 | `ARGUS_PUPPET_MAX_SET_RESULTS` | 5000 | each set of `/stats` and `/compare` |
-| `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | `/stats`, `/compare` bodies (and people per body: this / 2048); `/render` bodies up to 4 MiB |
+| `ARGUS_PUPPET_MAX_JSON_BYTES` | 134217728 (128 MiB) | `/stats`, `/compare` bodies (and people per body: this / 2048); `/render` bodies up to 4 MiB, `/adherence` up to 8 MiB |
 | `ARGUS_PUPPET_BODY_TIMEOUT_S` | 60 | every `POST` body (408 past it) |

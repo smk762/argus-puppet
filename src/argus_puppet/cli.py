@@ -409,6 +409,79 @@ def _print_comparison(c: PoseSetComparison, top: int, out: Path | None) -> None:
 CONTROL_SUFFIX = ".openpose.png"
 
 
+def _one_pose(source: Path, device: str | None) -> PoseResult:
+    """The pose of one source: a ``.pose.json`` sidecar read back, or an image posed in memory."""
+    from argus_puppet import extract, gpu, runtime, sidecars
+    from argus_puppet.models import SIDECAR_SUFFIX
+
+    try:
+        if source.name.endswith(SIDECAR_SUFFIX):
+            return sidecars.load_sidecar(source)
+        return extract.pose_image(source, settings=_extract_settings(device))
+    except gpu.OPERATOR_ERRORS as exc:
+        raise fail(gpu.operator_message(exc)) from None
+    except gpu.LEASE_ERRORS as exc:
+        raise fail(f"no GPU lease: {exc}") from None
+    except runtime.ModelUnavailable as exc:
+        raise fail(str(exc)) from None
+    except (sidecars.SidecarError, ValueError, OSError) as exc:
+        raise fail(f"cannot read a pose from {source}: {exc}") from None
+
+
+@app.command()
+def adherence(
+    target: Path = Argument(..., help="The pose that was asked for: a .pose.json sidecar or an image", exists=True),
+    output: Path = Argument(..., help="The generated image, or its .pose.json sidecar", exists=True),
+    threshold: float | None = Option(None, "--threshold", help="A person holds the pose below this distance [0.25]"),
+    primary_only: bool = Option(False, "--primary-only", help="Compare only the two primary subjects"),
+    device: str | None = Option(None, "--device", help=DEVICE_HELP),
+    min_joint_score: float | None = MIN_JOINT_SCORE,
+    min_usable_joints: int | None = MIN_USABLE_JOINTS,
+    min_shared_joints: int | None = MIN_SHARED_JOINTS,
+    out: Path | None = Option(None, "--out", "-o", help="Write the PoseAdherence JSON here"),
+    as_json: bool = Option(False, "--json", help="Print the PoseAdherence JSON instead of the summary"),
+) -> None:
+    """Whether a generated image holds the pose it was asked for. Exits 1 when it does not.
+
+    An image is posed in memory (nothing is written). Left and right matter: a figure flipped left to right does
+    not adhere, and is reported as mirrored."""
+    from argus_puppet.adherence import pose_adherence
+    from argus_puppet.models import DEFAULT_ADHERENCE_THRESHOLD
+
+    if threshold is not None and threshold < 0:
+        raise fail("--threshold must be >= 0")
+    params = _params(min_joint_score, min_usable_joints, None, min_shared_joints)
+    result = pose_adherence(
+        _one_pose(target, device),
+        _one_pose(output, device),
+        threshold=DEFAULT_ADHERENCE_THRESHOLD if threshold is None else threshold,
+        primary_only=primary_only,
+        params=params,
+    )
+    text = result.model_dump_json(indent=2)
+    if out is not None:
+        _write_json(out, text)
+    if as_json:
+        typer.echo(text)
+    else:
+        verdict = "adheres" if result.adheres else "does not adhere"
+        worst = "n/a" if result.distance is None else f"{result.distance:.3f}"
+        typer.echo(
+            f"{verdict}: {result.close} of {result.comparable} comparable target person(s) within "
+            f"{result.threshold:g} (largest distance {worst})"
+        )
+        for m in result.matches:
+            if m.unusable_reason is not None:
+                typer.echo(f"  target {m.target}: unusable ({m.unusable_reason})")
+            elif m.output is None:
+                typer.echo(f"  target {m.target}: no comparable person in the output")
+            else:
+                note = "close" if m.close else "mirrored" if m.mirrored else "far"
+                typer.echo(f"  target {m.target} -> output {m.output}: {m.distance:.3f} ({note})")
+    if not result.adheres:
+        raise typer.Exit(1)
+
+
 def _stroke(raw: str) -> float | str:
     if raw.strip().lower() == "auto":
         return "auto"

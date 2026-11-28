@@ -32,7 +32,7 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | A CLAUDE.md without the argus-suite block | CI `suite` job (argus-ci suite-check) |
 | A workflow testing a Python the package doesn't support | `tests/test_workflows.py` (every `python-version` in `.github/workflows/*.yml` satisfies `requires-python`) |
 | An image reporting a different version than its tag | Release `publish-image` job: builds with `VERSION` from the tag, checks the image's `__version__` and pushes only on a match; `tests/test_image_version.py` (build-arg wired, `.dockerignore` drops no tracked file) |
-| A state-changing route without the read-only and origin guards, or a caller-supplied path outside a configured root | `tests/test_must_never.py::test_every_unsafe_route_refuses_another_site`, `::test_read_only_mode_refuses_every_unsafe_route` (walk every POST/PUT/PATCH/DELETE route; `EXPECTED_UNSAFE` lists the five today), `::test_a_scan_path_escaping_the_data_root_is_refused` (`/pose/scan`, `/stats`, `/compare` paths) |
+| A state-changing route without the read-only and origin guards, or a caller-supplied path outside a configured root | `tests/test_must_never.py::test_every_unsafe_route_refuses_another_site`, `::test_read_only_mode_refuses_every_unsafe_route` (walk every POST/PUT/PATCH/DELETE route; `EXPECTED_UNSAFE` lists the seven today), `::test_a_scan_path_escaping_the_data_root_is_refused` (`/pose/scan`, `/stats`, `/compare` paths) |
 | Blocking inference or file I/O inside an `async def` route | suite-rules `blocking-in-async` (CI `suite-rules`); `tests/test_server.py::test_inference_runs_off_the_event_loop`, `tests/test_server_sets.py::test_compute_runs_off_the_event_loop` |
 | An uncapped request: a body, a pose set (the distance matrix is O(N^2)) or a render canvas past its limit | `tests/test_server_sets.py::test_set_size_and_body_caps`, `::test_render_caps_pixels_and_people`; `tests/test_server.py::test_pose_errors_map_to_status_codes` |
 | A body read past its cap on any route (chunked or declared, `/pose/scan` and multipart `/pose` included), or a set body validated before its results and people are counted | `tests/test_must_never.py::test_every_unsafe_route_refuses_an_over_cap_body_without_reading_it` (walks every unsafe route; `BODY_TYPES` names any non-JSON body); `tests/test_server.py::test_a_chunked_multipart_past_the_cap_is_refused_before_it_is_read_to_the_end`, `::test_the_scan_body_is_capped_checked_and_never_echoed`; `tests/test_server_sets.py::test_the_set_cap_bites_before_the_body_is_validated`, `::test_people_are_counted_before_the_body_is_validated` |
@@ -41,6 +41,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
 | An image sent to the age service without `--age-check`/`age_gate`, or to a URL a caller supplied | `tests/test_library.py::test_without_the_age_check_nothing_is_sent`, `tests/test_cli.py::test_without_age_check_no_estimator_is_built`; the URL is `Settings.age_url` only (`tests/test_age.py`) |
 | A non-permissive estimator weight or an unpinned model file | `tests/test_must_never.py::test_every_model_is_permissive_and_pinned` (licence allow-list Apache-2.0/MIT/BSD; 64-hex sha256 for the file and any archive) |
 | A model session built from bytes other than those just hashed (a memo vouching, or the file reopened after the check) | `tests/test_runtime.py::test_load_session_hashes_the_bytes_it_loads`, `::test_the_hash_memo_is_invalidated_by_any_change_to_the_file` |
+| A mirror image counted as holding the pose it was asked for (adherence compares as posed; only the set metrics are mirror-invariant), or one output person matched to two target people | `tests/test_adherence.py::test_a_mirror_image_does_not_adhere_and_is_named`, `::test_one_output_person_cannot_stand_in_for_two_target_people` |
+| A black control image answered for an image with nobody in it | `tests/test_control.py::test_the_route_refuses_an_image_with_nobody_in_it`, `::test_control_image_refuses_an_image_with_nobody_to_draw` |
 | A pre-release tag moving `latest` / `latest-gpu` | `tests/test_image_version.py::test_only_a_final_release_moves_latest` |
 | A tracked image, video or model file, or an image hidden in a base64 literal | `tests/test_must_never.py` (`git ls-files` media/model suffixes; base64 runs decoded for image magic) |
 | A stored `PersonPose.labels` read by the set metrics (a 1.0 sidecar and a 1.1 one must give identical stats, compare and library output) | `tests/test_metrics.py::test_stored_person_labels_never_change_stats_compare_or_library` |
@@ -96,7 +98,8 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   folder run and hands it back on `should_yield()`.
 - `extract.py` — the library API: `pose_image(bytes|path) -> PoseResult`, `pose_folder(root) -> Iterator[ImageOutcome]`
   (atomic sorted-key sidecars, skip-existing, `sidecar_collision`, unreadable images reported), `scan() -> ScanSummary`.
-  Images decode through `argus_cortex.limits.open_image` with EXIF orientation. `build_result` fills every person's
+  `control_image(image, options)` is `pose_image` then `render_png` (the PNG and the `PoseResult`; `NobodyFound` when
+  there is nobody to draw). Images decode through `argus_cortex.limits.open_image` with EXIF orientation. `build_result` fills every person's
   `PersonPose.labels` (wire 1.1) from `labels.pose_labels`; skip-existing keeps a 1.0 sidecar as it is.
 - `sidecars.py` — read sidecars back: `find_sidecars`, `load_sidecar(s)`, `load_sidecars_with_paths`,
   `image_for_sidecar` (the image a sidecar sits beside).
@@ -111,6 +114,10 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   `cluster_ids`), coverage, 2D projection; `keypoint_distance_matrix` (the library's distance), `shared_estimator`.
 - `compare.py` — `compare_pose_sets(outputs, reference, threshold=0.04, params=)`: nearest reference per output (null
   when none is comparable), memorised share over matched outputs, coverage JS divergence. See `docs/metrics.md`.
+- `adherence.py` — `pose_adherence(target, output, threshold=0.25, primary_only=, params=)`: whether a generated
+  image holds the pose it was asked for. Greedy closest-first one-to-one matching of target people to output people
+  on `embedding.oriented_distances` (as posed, not mirror-invariant; the mirrored distance is reported beside it).
+  See `docs/conditioning.md`.
 - `render.py` — OpenPose-convention control images from scratch (numpy + Pillow): `render_pose/array/png`,
   `canvas_size`, `canvas_transform`; `RenderOptions` carries fit/stroke/margin/primary, keywords override. Limbs
   reproduce `cv2.ellipse2Poly` + `fillConvexPoly` in numpy (`_ellipse_polygon`, `_fill_convex_polygon`; pixel-exact
@@ -123,7 +130,7 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   `min_age_from_payload` (fails closed). Callers exclude anything that raised or read `None`.
 - `weights.py` — `models list|fetch|verify`: downloads via `argus_cortex.net.fetch` from `ALLOWED_HOSTS` only,
   archive sha256 then the one zip member (never `extractall`), onnx sha256 + size, atomic write.
-- `cli.py` — Typer app; entry point `argus-puppet` (`[project.scripts]`): `pose`, `stats`, `compare`, `render`,
+- `cli.py` — Typer app; entry point `argus-puppet` (`[project.scripts]`): `pose`, `stats`, `compare`, `render`, `adherence`,
   `library build|sample`, `serve`, `models list|fetch|verify`, `schema`, `version`. Heavy imports inside commands; logs
   go to stderr (the callback configures structlog) so `--json` stdout stays parseable. Run `make docs` after.
 - `server/app.py` — `create_app(settings, *, estimator=, coordinator=)` (and a lazy module-level `app` for uvicorn):
@@ -131,7 +138,9 @@ it **UNENFORCED** until something checks it. When a rule bites, add a check rath
   `Health` field must not reuse a `ServiceHealth` name with another meaning), `POST /pose` (writes nothing; inference via `asyncio.to_thread`, bounded concurrency -> 503), `POST
   /pose/scan` (the one write; `path` fenced under `Settings.data_root` with `safe_join`), `POST /stats`, `/compare`
   (sets inline or as sidecar folders fenced like `/pose/scan`; `max_set_results` per set) and `/render` (PNG;
-  `max_pixels`, `max_people`). Every body is read through `read_capped` (its cap counted as it streams, declared
+  `max_pixels`, `max_people`), `POST /control` (an image straight to its control PNG: `/pose`'s body, admission and
+  lease, the render options as query parameters through `control_options`, 422 for nobody) and `POST /adherence`
+  (`AdherenceRequest`, 8 MiB, `max_people` per pose). Every body is read through `read_capped` (its cap counted as it streams, declared
   length or not; `Settings.body_timeout_s` deadline -> 408); JSON bodies through `read_json` on top (`max_json_bytes`,
   16 KiB for `/pose/scan`, 4 MiB for `/render`; set bodies pre-counted on the raw bytes by `set_precheck`; 422 without
   echoing input), compute through `asyncio.to_thread` under `AppState.compute_admit`. A new route reads its body
