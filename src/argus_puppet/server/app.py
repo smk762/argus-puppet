@@ -16,6 +16,12 @@ Routes:
   path; ``threshold``, ``params``) -> :class:`~argus_puppet.models.PoseSetComparison`. Writes nothing.
 * ``POST /render`` :class:`~argus_puppet.models.RenderRequest` (``pose``: a PoseResult or ``{keypoints, width,
   height}``; ``options``) -> ``image/png``. Writes nothing.
+* ``POST /control`` -> ``image/png``: one image straight to its control PNG (``/pose`` then ``/render`` in one call).
+  The body is ``/pose``'s; the render options are query parameters. Shares ``/pose``'s admission bound and GPU lease.
+  422 when there is nobody to draw. Writes nothing.
+* ``POST /adherence`` :class:`~argus_puppet.models.AdherenceRequest` (``target`` and ``output`` poses, ``threshold``,
+  ``primary_only``, ``params``) -> :class:`~argus_puppet.models.PoseAdherence`: whether a generated image holds the
+  pose it was asked for. Writes nothing.
 
 A set given as ``path`` is the ``*.pose.json`` sidecars of a folder under the data root, fenced as ``/pose/scan``
 fences its path (409 without a data root, 400 outside it, 404 missing). A set holds at most
@@ -55,18 +61,22 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError
 
-from argus_puppet import __version__, compare, extract, gpu, metrics, registry, render, runtime, sidecars
+from argus_puppet import __version__, adherence, compare, extract, gpu, metrics, registry, render, runtime, sidecars
 from argus_puppet import estimator as estimator_mod
 from argus_puppet.config import Settings
 from argus_puppet.models import (
+    DEFAULT_ADHERENCE_THRESHOLD,
     PUPPET_VERSION,
+    AdherenceRequest,
     BarePose,
     CompareRequest,
     Health,
+    PoseAdherence,
     PoseResult,
     PoseSetComparison,
     PoseSetSource,
     PoseSetStats,
+    RenderOptions,
     RenderRequest,
     ScanRequest,
     ScanSummary,
@@ -88,6 +98,11 @@ SCAN_JSON_BYTES = 16 * 1024
 # people share one "keypoints" key, so they cannot be counted on the raw bytes like a set's: this cap bounds them
 # (zero-filled people cost ~1 KB of JSON and ~18 KB validated).
 RENDER_JSON_BYTES = 4 * 1024 * 1024
+# An AdherenceRequest is two poses.
+ADHERENCE_JSON_BYTES = 2 * RENDER_JSON_BYTES
+# The response header of POST /control that says how many people were drawn.
+PEOPLE_HEADER = "X-Argus-Puppet-People"
+DRAW_PARTS = ("body", "hands", "face")
 BUSY_RETRY_S = 1
 GPU_RETRY_S = 5
 
@@ -164,6 +179,47 @@ def parse_face_hint(raw: str | None) -> tuple[float, float, float, float] | None
     if len(values) != 4 or not all(math.isfinite(v) for v in values) or values[2] <= 0 or values[3] <= 0:
         raise HTTPException(400, "face must be x,y,w,h: four finite numbers, w and h > 0")
     return values  # type: ignore[return-value]
+
+
+def control_options(
+    draw: str | None,
+    width: int | None,
+    height: int | None,
+    fit: str | None,
+    primary_only: bool,
+    min_score: float | None,
+    stroke_scale: str | None,
+) -> RenderOptions:
+    """``POST /control``'s query parameters as :class:`RenderOptions`. Raises ``HTTPException(400)`` naming the
+    parameter that is wrong; the value is never echoed."""
+    parts = DRAW_PARTS if draw is None else tuple(p.strip().lower() for p in draw.split(",") if p.strip())
+    if not parts or any(p not in DRAW_PARTS for p in parts):
+        raise HTTPException(400, f"draw must list one or more of {', '.join(DRAW_PARTS)}, comma separated")
+    given: dict[str, Any] = {part: part in parts for part in DRAW_PARTS}
+    given |= {"width": width, "height": height, "primary_only": primary_only}
+    if fit is not None:
+        given["fit"] = fit
+    if min_score is not None:
+        given["min_score"] = min_score
+    if stroke_scale is not None and stroke_scale.strip().lower() != "auto":
+        try:
+            given["stroke_scale"] = float(stroke_scale)
+        except ValueError:
+            raise HTTPException(400, "stroke_scale must be a number or 'auto'") from None
+    try:
+        return RenderOptions(**given)
+    except ValidationError as exc:
+        first = exc.errors(include_url=False, include_input=False, include_context=False)[0]
+        raise HTTPException(400, f"{first['loc'][0]}: {first['msg']}") from None
+
+
+def people_of(settings: Settings, pose: PoseResult | BarePose, label: str) -> None:
+    """413 when *pose* (a request's *label*) holds more people than the people cap."""
+    n = len(pose.people()) if isinstance(pose, BarePose) else len(pose.people)
+    if n > settings.max_people:
+        raise HTTPException(
+            413, f"{label}: {n} people is over the cap of {settings.max_people} (ARGUS_PUPPET_MAX_PEOPLE)"
+        )
 
 
 def model_errors(exc: Exception) -> HTTPException:
@@ -511,6 +567,63 @@ def create_app(
             except Exception as exc:  # noqa: BLE001 - model_errors maps what it knows and re-raises the rest
                 raise model_errors(exc) from None
 
+    @app.post("/control", response_class=Response, responses={200: {"content": {"image/png": {}}}})
+    async def post_control(
+        request: Request,
+        name: str | None = Query(None, description="The image's name (a file name, no path); only checked."),
+        face: str | None = Query(None, description="Primary-face hint 'x,y,w,h' in pixels: picks the primary."),
+        draw: str | None = Query(None, description="Parts to draw, comma separated: body, hands, face (default all)."),
+        width: int | None = Query(None, ge=1, le=8192, description="Canvas width (default: the image's)."),
+        height: int | None = Query(None, ge=1, le=8192, description="Canvas height (default: the image's)."),
+        fit: str | None = Query(None, description="contain (default), cover, stretch or skeleton."),
+        primary_only: bool = Query(False, description="Draw only the primary person."),
+        min_score: float | None = Query(None, description="Visibility threshold (default 0.3)."),
+        stroke_scale: str | None = Query(None, description="Stroke width factor, or 'auto' (the default)."),
+    ) -> Response:
+        """One image straight to its OpenPose-convention control PNG: ``/pose`` then ``/render`` in one call. The
+        body is ``/pose``'s (raw image bytes or a multipart file). ``X-Argus-Puppet-People`` says how many people
+        were drawn. Nothing is written."""
+        face_hint = parse_face_hint(face)
+        options = control_options(draw, width, height, fit, primary_only, min_score, stroke_scale)
+        # A canvas given in full is checked before the image is read; one taken from the image, once it is posed.
+        canvas = (options.width or 0) * (options.height or 0)
+        if canvas > settings.max_pixels:
+            raise HTTPException(
+                413, f"a {options.width}x{options.height} canvas is over the cap of {settings.max_pixels} pixels"
+            )
+        try:
+            priority = gpu.parse_priority(request.headers.get(gpu.PRIORITY_HEADER))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        async with state.admit.slot():
+            data, filename = await read_image(request, settings.max_upload_bytes, timeout=settings.body_timeout_s)
+            if not data:
+                raise HTTPException(400, "no image: the body is empty")
+            image_name = _name(name, filename)
+            try:
+                png, result = await asyncio.to_thread(
+                    extract.control_image,
+                    data,
+                    options,
+                    max_pixels=settings.max_pixels,
+                    name=image_name,
+                    settings=settings,
+                    estimator=state.fixed_estimator,
+                    face_hint=face_hint,
+                    priority=priority,
+                    coordinator=state.coordinator,
+                )
+            except extract.NobodyFound as exc:
+                raise HTTPException(422, str(exc)) from None
+            except TooLarge as exc:
+                raise HTTPException(413, str(exc)) from None
+            except BadInput as exc:
+                raise HTTPException(415 if "not an image" in str(exc) else 400, str(exc)) from None
+            except Exception as exc:  # noqa: BLE001 - model_errors maps what it knows and re-raises the rest
+                raise model_errors(exc) from None
+        drawn = 1 if options.primary_only else len(result.people)
+        return Response(content=png, media_type="image/png", headers={PEOPLE_HEADER: str(drawn)})
+
     @app.post("/pose/scan", response_model=ScanSummary)
     async def post_scan(request: Request) -> ScanSummary:
         """Pose a folder under the data root into ``<stem>.pose.json`` sidecars (the one state-changing route):
@@ -593,6 +706,26 @@ def create_app(
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from None
             return Response(content=png, media_type="image/png")
+
+    @app.post("/adherence", response_model=PoseAdherence)
+    async def post_adherence(request: Request) -> PoseAdherence:
+        """Whether a generated image holds the pose it was asked for: ``AdherenceRequest`` (the target pose and the
+        pose ``POST /pose`` found in the output). Writes nothing."""
+        async with state.compute_admit.slot():
+            req = await read_json(
+                request, AdherenceRequest, min(cap, ADHERENCE_JSON_BYTES), timeout=settings.body_timeout_s
+            )
+            people_of(settings, req.target, "target")
+            people_of(settings, req.output, "output")
+            threshold = DEFAULT_ADHERENCE_THRESHOLD if req.threshold is None else req.threshold
+            return await asyncio.to_thread(
+                adherence.pose_adherence,
+                req.target,
+                req.output,
+                threshold=threshold,
+                primary_only=req.primary_only,
+                params=req.params,
+            )
 
     return app
 

@@ -20,6 +20,7 @@ $ argus-puppet [OPTIONS] COMMAND [ARGS]...
 * `pose`: Write a &lt;stem&gt;.pose.json sidecar beside...
 * `stats`: Pose diversity, clusters and coverage of a...
 * `compare`: Each output&#x27;s nearest reference pose,...
+* `adherence`: Whether a generated image holds the pose...
 * `render`: Draw OpenPose-convention skeleton control...
 * `serve`: Run the HTTP service (needs the server...
 * `models`: List, download and verify the pinned model...
@@ -135,6 +136,36 @@ $ argus-puppet compare [OPTIONS] {outputs} {reference}
 * `--top <int>`: Closest matches to list  [default: 20]
 * `-o, --out <path>`: Write the PoseSetComparison JSON here
 * `--json`: Print the PoseSetComparison JSON instead of the summary
+* `--help`: Show this message and exit.
+
+## `argus-puppet adherence`
+
+Whether a generated image holds the pose it was asked for. Exits 1 when it does not.
+
+An image is posed in memory (nothing is written). Left and right matter: a figure flipped left to right does
+not adhere, and is reported as mirrored.
+
+**Usage**:
+
+```console
+$ argus-puppet adherence [OPTIONS] {target} {output}
+```
+
+**Arguments**:
+
+* `target <path>`: The pose that was asked for: a .pose.json sidecar or an image  [required]
+* `output <path>`: The generated image, or its .pose.json sidecar  [required]
+
+**Options**:
+
+* `--threshold <float>`: A person holds the pose below this distance [0.25]
+* `--primary-only`: Compare only the two primary subjects
+* `--device <str>`: Where to run extraction: auto, cpu, cuda (default: settings)
+* `--min-joint-score <float>`: A joint is confident at or above this score [0.3]
+* `--min-usable-joints <int>`: Confident body joints a pose needs to count [8]
+* `--min-shared-joints <int>`: Joints two poses must share to be compared [6]
+* `-o, --out <path>`: Write the PoseAdherence JSON here
+* `--json`: Print the PoseAdherence JSON instead of the summary
 * `--help`: Show this message and exit.
 
 ## `argus-puppet render`

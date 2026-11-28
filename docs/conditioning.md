@@ -261,25 +261,95 @@ Set the canvas to the generation resolution and aspect ratio. A skeleton drawn f
 a landscape generation is stretched by the generator, which is exactly the distortion `contain` and `skeleton`
 fitting avoid.
 
+**One call from a photo.** `POST /control` (or `extract.control_image`, or `argus-puppet render photo.jpg`) goes
+from an image straight to its control PNG. Nobody in the image is an error, not a black picture.
+
+```python
+from argus_puppet.extract import control_image
+from argus_puppet.models import RenderOptions
+
+png, result = control_image("photo.jpg", RenderOptions(width=1024, height=1024))   # result: the PoseResult drawn
+```
+
 **A pose image is an input like any other.** It is derived from a source photo, and the generator's input checks
 apply to that source photo, not just to the stick figure: the library keeps each pose's source image name and
 hash so the generator can run its checks on the source and record the skeleton with its output.
 
 ### argus-darkroom
 
-argus-darkroom, the suite's guarded generator, takes a pose this way. A generation request carries the **source
-photo** (`pose.data_base64`), never a control image or keypoints, so every skeleton it renders from comes from a
-picture it checked:
+argus-darkroom, the suite's guarded generator, takes a pose either way: as a **source photo** it extracts the pose
+from (`pose.data_base64`), or as **keypoints** it is given to enforce (`pose.keypoints` with `width` and `height`:
+the shape of a `BarePose`, so a library entry's `keypoints`, `width` and `height` fit as they are). It never takes a
+control image: any picture would do as one, and nobody would have checked it.
 
-1. The photo gets darkroom's full input scan (SingGuard, NudeNet, the age estimate) and goes on only when it passes.
-2. Darkroom posts the checked photo to `POST /pose` (which writes nothing) and reads every person's keypoints.
-3. It posts those keypoints to `POST /render` as a `BarePose` (`{keypoints: [person, ...], width, height}`) with
+1. A photo gets darkroom's full input scan (SingGuard, NudeNet, the age estimate) and goes on only when it passes;
+   darkroom then posts it to `POST /pose` (which writes nothing) and reads every person's keypoints. Given keypoints
+   skip this step: they are numbers, with nothing to scan.
+2. It posts the keypoints to `POST /render` as a `BarePose` (`{keypoints: [person, ...], width, height}`) with
    `options` `{body, hands, face, width, height, fit}`: the canvas is the generation size, and `fit` is `contain`,
-   `cover` or `skeleton`. For the photo's primary subject alone it sends that one person's keypoints.
-4. It checks the PNG that comes back (the generation's size, at most 256 colours, something drawn) and feeds it to
-   the ControlNet. Its record keeps the photo's hashes, the keypoints, and the estimator's version and model hashes
-   from the `PoseResult`.
+   `cover` or `skeleton`. For the primary subject alone it sends that one person's keypoints.
+3. It checks the PNG that comes back (the generation's size, at most 256 colours, something drawn) and feeds it to
+   the ControlNet. Its record keeps the keypoints, and for a photo its hashes and the estimator's version and model
+   hashes from the `PoseResult`.
 
-To generate from a library pose, send darkroom that entry's source image (`source_image`, verified by
-`source_sha256`); `sample` picks which entries. Point darkroom at puppet with `ARGUS_DARKROOM_PUPPET_URL`, or the
-suite-wide `ARGUS_PUPPET_URL`.
+To generate from a library pose, send darkroom the entry's `keypoints`, `width` and `height` (and its
+`source_sha256`, which darkroom records as stated), or the entry's source image if you want darkroom to check the
+photo itself; `sample` picks which entries. Darkroom cannot tell where given keypoints came from, so for poses taken
+from real people build the library with the [age check](#the-age-check). Point darkroom at puppet with
+`ARGUS_DARKROOM_PUPPET_URL`, or the suite-wide `ARGUS_PUPPET_URL`.
+
+## Checking the result: pose adherence
+
+A pose ControlNet is asked for a pose; it does not always comply. Low strength, a prompt that pulls the other way or
+a pose the model finds hard give a figure that only roughly follows the skeleton, or follows it flipped. **Pose
+adherence** measures that: extract the pose from the generated image and compare it with the pose that was asked for.
+
+```python
+from argus_puppet.adherence import pose_adherence
+from argus_puppet.extract import pose_image
+
+target = library_entry_or_sidecar            # a PoseResult, a BarePose, or a list of (133, 3) arrays
+output = pose_image("generated.png")
+report = pose_adherence(target, output)      # PoseAdherence
+report.adheres, report.distance, [m.mirrored for m in report.matches]
+```
+
+`argus-puppet adherence target.pose.json generated.png` does the same and exits 1 when the pose is not held;
+`POST /adherence` takes the two poses as JSON ([server.md](server.md#post-adherence)).
+
+**The distance.** The suite's pose distance ([pose-vector.md](pose-vector.md)): the 17 body joints, centred on the
+hips and scaled by the torso, joints below the confidence threshold left out, in torso units. One thing differs
+from the set metrics: it is **not mirror-invariant**. For a set's diversity, a pose and its mirror image are the same
+pose. For adherence, a figure with the other arm raised did not do what was asked. Each match reports `distance` (as
+posed) and `mirrored_distance` (against the output's mirror image), and `mirrored: true` when only the mirror image
+is within the threshold, so a flip is told apart from a miss.
+
+**Matching people.** Every usable target person is matched to one output person. Pairs are taken closest first and
+each person is used once, so two target people cannot both be satisfied by one figure, and the order people are
+listed in does not matter. `primary_only` compares the two primary subjects alone (a bare pose's first person).
+Extra people in the output are ignored.
+
+**The verdict.** A target person is `close` when their match is below `threshold`. The result `adheres` when every
+usable target person is close, and there is at least one. A target person with too few confident joints is listed
+with an `unusable_reason` and counts neither way; an output with nobody comparable does not adhere.
+
+**What 0.25 means.** The default threshold is the metrics' cluster cut: the output's pose would join the target's
+pose cluster. On the synthetic test figures (16 poses, each re-drawn 40 times with every limb angle jittered and
+0.03 torso units of joint noise):
+
+| Same pose, limb angles off by up to | Median distance | 90th percentile | Within 0.25 |
+|---|---|---|---|
+| 5 degrees | 0.05 | 0.07 | 100 % |
+| 10 degrees | 0.07 | 0.09 | 100 % |
+| 20 degrees | 0.11 | 0.14 | 100 % |
+| 30 degrees | 0.15 | 0.19 | 100 % |
+
+Between two *different* poses of the 16 the median distance is 0.72, and 4 % of pairs are under 0.25 (the nearest
+pair, 0.12, differs only in how the arms hang). So 0.25 is lenient: it accepts a loose rendition of the pose and
+rejects a different one. For a strict check use about 0.1. **It has not been calibrated on real ControlNet output**:
+read `distance` over a batch from your own model and set the threshold from that.
+
+**What it does not see.** Pose shape only. The vector is centred and scaled per person, so a figure in the right
+pose at the wrong place or size in the frame still adheres; hands, face and feet are not compared; and it inherits
+the estimator's errors on the generated image (a limb the estimator cannot find is left out, and with too few
+shared joints the pair cannot be compared at all).
