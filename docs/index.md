@@ -61,9 +61,11 @@ are geometry rules, tested on synthetic figures only; read [metrics.md](metrics.
 cannot tell apart. Puppet's primary person follows curator's primary-face rule, and `POST /pose?face=x,y,w,h`
 takes curator's primary face as a hint ([server.md](server.md#the-primary-subject)).
 
-**Generators: a pose input for ControlNet.** (argus-darkroom has no pose input yet.) `POST /render` (or `render_png`) turns a sidecar into a control
+**Generators: a pose input for ControlNet.** `POST /render` (or `render_png`) turns a sidecar into a control
 image at the generation size; a pose library gives a diverse batch. [conditioning.md](conditioning.md) covers the
 colour convention, sizing, and why the source photo, not the skeleton, is what the input checks apply to.
+argus-darkroom's `pose` input is the suite's generator: it is given the source photo, checks it, and calls
+`POST /pose` and `POST /render` itself ([conditioning.md](conditioning.md#argus-darkroom)).
 
 **Operators.** [deploy.md](deploy.md) for the images, the model volume and every environment variable;
 [server.md](server.md#security-model) for what the service exposes; [models.md](models.md) for fetching and

@@ -264,3 +264,22 @@ fitting avoid.
 **A pose image is an input like any other.** It is derived from a source photo, and the generator's input checks
 apply to that source photo, not just to the stick figure: the library keeps each pose's source image name and
 hash so the generator can run its checks on the source and record the skeleton with its output.
+
+### argus-darkroom
+
+argus-darkroom, the suite's guarded generator, takes a pose this way. A generation request carries the **source
+photo** (`pose.data_base64`), never a control image or keypoints, so every skeleton it renders from comes from a
+picture it checked:
+
+1. The photo gets darkroom's full input scan (SingGuard, NudeNet, the age estimate) and goes on only when it passes.
+2. Darkroom posts the checked photo to `POST /pose` (which writes nothing) and reads every person's keypoints.
+3. It posts those keypoints to `POST /render` as a `BarePose` (`{keypoints: [person, ...], width, height}`) with
+   `options` `{body, hands, face, width, height, fit}`: the canvas is the generation size, and `fit` is `contain`,
+   `cover` or `skeleton`. For the photo's primary subject alone it sends that one person's keypoints.
+4. It checks the PNG that comes back (the generation's size, at most 256 colours, something drawn) and feeds it to
+   the ControlNet. Its record keeps the photo's hashes, the keypoints, and the estimator's version and model hashes
+   from the `PoseResult`.
+
+To generate from a library pose, send darkroom that entry's source image (`source_image`, verified by
+`source_sha256`); `sample` picks which entries. Point darkroom at puppet with `ARGUS_DARKROOM_PUPPET_URL`, or the
+suite-wide `ARGUS_PUPPET_URL`.

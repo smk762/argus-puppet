@@ -9,7 +9,9 @@ own: other packages call it over HTTP, as they call argus-retina's detectors. Fr
 (`PROOF_PUPPET_URL`) puts a pose block on its eval report and gates on `--min-pose-diversity`, argus-curator
 (`ARGUS_CURATOR_PUPPET_URL`) records pose labels and a scan-level pose cluster per image, and argus-lens
 (`LENS_POSE_URL`) uses it as a reconcile pose verifier; argus-forge, Studio and Cull read curator's pose fields.
-argus-darkroom does not call it yet.
+argus-darkroom (`ARGUS_DARKROOM_PUPPET_URL`) takes a pose photo with a generation request, checks the photo like any
+input image, and has puppet read its keypoints (`POST /pose`) and draw the skeleton (`POST /render`) that its pose
+ControlNet renders from.
 
 Part of the [Argus suite](https://github.com/smk762?tab=repositories&q=argus). Shared code (wire-schema versioning,
 write guards, GPU leases) comes from argus-cortex.
