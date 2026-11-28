@@ -87,6 +87,8 @@ EXPECTED_UNSAFE = (
     ("POST", "/stats"),
     ("POST", "/compare"),
     ("POST", "/render"),
+    ("POST", "/control"),
+    ("POST", "/adherence"),
 )
 
 
@@ -174,7 +176,8 @@ def test_a_scan_path_escaping_the_data_root_is_refused(tmp_path) -> None:
 MB = 1024 * 1024
 # The content type each unsafe route reads; any route not listed reads JSON. A new route that reads something else
 # fails the walk below until it is listed here (and caps its body).
-BODY_TYPES: dict[str, tuple[str, ...]] = {"/pose": ("image/png", "multipart/form-data; boundary=B")}
+_IMAGE_BODY = ("image/png", "multipart/form-data; boundary=B")
+BODY_TYPES: dict[str, tuple[str, ...]] = {"/pose": _IMAGE_BODY, "/control": _IMAGE_BODY}
 
 
 def _bodies(app) -> list[tuple[str, str, str]]:

@@ -44,7 +44,10 @@ from argus_puppet.skeleton import LAYOUT, NUM_KEYPOINTS, part_mean_scores
 #      and PoseSetComparison.output_unusable_reasons / reference_unusable_reasons (optional; null / {} before 1.2).
 # 1.3: Health.cuda_unavailable (why CUDA cannot be used) and Health.last_lease_via (how the last GPU lease was granted);
 #      Health.device now says where work really runs (optional; null before 1.3).
-PUPPET_VERSION = "1.3"
+# 1.4: PoseAdherence and AdherenceRequest (POST /adherence: does an image hold the pose it was asked for). New
+#      documents only; no existing one changed. (POST /control, an image straight to its control PNG, has no body
+#      model: an image in, a PNG out, RenderOptions as query parameters.)
+PUPPET_VERSION = "1.4"
 SUPPORTED_PUPPET_MAJORS: tuple[str, ...] = ("1",)
 WIRE_TITLE = "argus-puppet wire contract"
 # The committed schema, relative to the repo root (``argus-puppet schema`` writes it, ``--check`` compares).
@@ -776,6 +779,84 @@ class CompareRequest(BaseModel):
     params: MetricParams = Field(default_factory=MetricParams, description="Metric thresholds (default: suite's).")
 
 
+# The default adherence threshold: the cluster cut, so "adheres" means "the output's pose would join the target's
+# pose cluster". Not calibrated on real ControlNet output: read the distance and set your own.
+DEFAULT_ADHERENCE_THRESHOLD = DEFAULT_CLUSTER_THRESHOLD
+
+
+class AdherenceMatch(BaseModel):
+    """One target person and the output person holding their pose, if any."""
+
+    target: int = Field(..., ge=0, description="Index of the person in the target pose's people.")
+    output: int | None = Field(
+        None,
+        ge=0,
+        description="Index of the matched person in the output's people; null when the target person is unusable, "
+        "or no unmatched output person shares enough joints with them.",
+    )
+    distance: float | None = Field(
+        None,
+        ge=0.0,
+        description="Pose distance (torso units) between the two as posed: left stays left. Unlike the set metrics' "
+        "distance it is not mirror-invariant. Null exactly when output is null.",
+    )
+    mirrored_distance: float | None = Field(
+        None,
+        ge=0.0,
+        description="The same distance against the output person's left/right mirror image; null when output is "
+        "null or the mirror image shares too few joints.",
+    )
+    shared_joints: int | None = Field(
+        None, ge=0, le=17, description="Body joints confident in both people; null exactly when output is null."
+    )
+    close: bool = Field(..., description="distance is below the threshold: this person holds the pose.")
+    mirrored: bool = Field(
+        False,
+        description="Not close as posed, but the mirror image is: the output holds the pose flipped left to right.",
+    )
+    unusable_reason: UnusableReason | None = Field(
+        None, description="Why the target person cannot be compared, when they cannot: " + _REASONS_HELP + "."
+    )
+
+    @model_validator(mode="after")
+    def _match_agrees(self) -> AdherenceMatch:
+        if not ((self.output is None) == (self.distance is None) == (self.shared_joints is None)):
+            raise ValueError("output, distance and shared_joints are all set or all null")
+        if self.output is None and (self.close or self.mirrored):
+            raise ValueError("a target person with no matched output person is neither close nor mirrored")
+        return self
+
+
+class PoseAdherence(_Versioned):
+    """Whether an image holds the pose it was asked for: a generated output's people against a target pose's.
+
+    It compares pose shape (the 17 body joints, hip-centred and torso-scaled, as the set metrics do), so it does not
+    see where in the frame a person stands, how large they are, or their hands and face.
+    """
+
+    adheres: bool = Field(
+        ...,
+        description="Every comparable target person is matched to an output person within the threshold, and at "
+        "least one target person is comparable.",
+    )
+    threshold: float = Field(..., ge=0.0, description="The distance below which a person holds the pose.")
+    primary_only: bool = Field(..., description="Whether only the two primary subjects were compared.")
+    target_people: int = Field(..., ge=0, description="People in the target pose that were considered.")
+    output_people: int = Field(..., ge=0, description="People in the output that were considered.")
+    comparable: int = Field(..., ge=0, description="Target people whose pose is usable.")
+    matched: int = Field(..., ge=0, description="Comparable target people matched to an output person.")
+    close: int = Field(..., ge=0, description="Matched target people within the threshold.")
+    distance: float | None = Field(
+        None, ge=0.0, description="The largest matched distance (the one the verdict hangs on); null with no match."
+    )
+    mean_distance: float | None = Field(None, ge=0.0, description="Mean matched distance; null with no match.")
+    matches: list[AdherenceMatch] = Field(default_factory=list, description="One per target person, in order.")
+    params: MetricParams = Field(default_factory=MetricParams, description="The thresholds used.")
+    estimator: EstimatorProvenance | None = Field(
+        None, description="The estimator, when both poses are PoseResults naming the same one; else null."
+    )
+
+
 class BarePose(BaseModel):
     """People's keypoints without the rest of a PoseResult: one person (133 points) or a list of people."""
 
@@ -798,6 +879,21 @@ class RenderRequest(BaseModel):
     options: RenderOptions = Field(default_factory=RenderOptions)
 
 
+class AdherenceRequest(BaseModel):
+    """``POST /adherence``: a generated output's pose against the target pose it was asked for."""
+
+    target: PoseResult | BarePose = Field(..., description="The pose that was asked for (e.g. the control pose).")
+    output: PoseResult | BarePose = Field(..., description="The pose found in the generated image (POST /pose).")
+    threshold: float | None = Field(
+        None, ge=0.0, description="Distance below which a person holds the pose (default 0.25, the cluster cut)."
+    )
+    primary_only: bool = Field(
+        False,
+        description="Compare only the two primary subjects (a bare pose's first person) instead of every person.",
+    )
+    params: MetricParams = Field(default_factory=MetricParams, description="Metric thresholds (default: suite's).")
+
+
 WIRE_MODELS: tuple[type[BaseModel], ...] = (
     PoseResult,
     PoseSetStats,
@@ -810,6 +906,8 @@ WIRE_MODELS: tuple[type[BaseModel], ...] = (
     StatsRequest,
     CompareRequest,
     RenderRequest,
+    PoseAdherence,
+    AdherenceRequest,
 )
 
 

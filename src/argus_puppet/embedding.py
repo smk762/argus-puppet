@@ -581,6 +581,27 @@ def pose_distance(
     return float(out[0, 0])
 
 
+def oriented_distances(
+    a: PoseVector,
+    b: PoseVector,
+    *,
+    min_shared_joints: int = DEFAULT_MIN_SHARED_JOINTS,
+    min_shared_limb_joints: int = DEFAULT_MIN_SHARED_LIMB_JOINTS,
+) -> tuple[float, float]:
+    """The two distances :func:`pose_distance` takes the smaller of, kept apart: *a* against *b* as posed, and *a*
+    against *b*'s left/right mirror image. Each is NaN when that orientation shares too few joints.
+
+    For a question where left and right matter (does an image hold the pose it was asked for, or its mirror image?)
+    the first is the answer and the second says a mirror image was found instead.
+    """
+    ca, ma = a.coords[None].astype(np.float64), a.mask[None]
+    cb, mb = b.coords[None].astype(np.float64), b.mask[None]
+    cbm, mbm = mirror(cb, mb)
+    posed = _oriented(ca, ma, cb, mb, min_shared_joints, min_shared_limb_joints)
+    mirrored = _oriented(ca, ma, cbm, mbm, min_shared_joints, min_shared_limb_joints)
+    return float(posed[0, 0]), float(mirrored[0, 0])
+
+
 # Sizes one chunk to rows * cols * 34 <= 1.5M: its two (rows, cols, 17) float32 work arrays are ~3 MB each.
 _CHUNK_ELEMENTS = 1_500_000
 # The distance kernels work in float32: coordinates are O(1) torso units, so 7 significant digits are plenty, and

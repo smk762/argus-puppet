@@ -1,5 +1,170 @@
 {
   "$defs": {
+    "AdherenceMatch": {
+      "description": "One target person and the output person holding their pose, if any.",
+      "properties": {
+        "close": {
+          "description": "distance is below the threshold: this person holds the pose.",
+          "title": "Close",
+          "type": "boolean"
+        },
+        "distance": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pose distance (torso units) between the two as posed: left stays left. Unlike the set metrics' distance it is not mirror-invariant. Null exactly when output is null.",
+          "title": "Distance"
+        },
+        "mirrored": {
+          "default": false,
+          "description": "Not close as posed, but the mirror image is: the output holds the pose flipped left to right.",
+          "title": "Mirrored",
+          "type": "boolean"
+        },
+        "mirrored_distance": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The same distance against the output person's left/right mirror image; null when output is null or the mirror image shares too few joints.",
+          "title": "Mirrored Distance"
+        },
+        "output": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Index of the matched person in the output's people; null when the target person is unusable, or no unmatched output person shares enough joints with them.",
+          "title": "Output"
+        },
+        "shared_joints": {
+          "anyOf": [
+            {
+              "maximum": 17,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Body joints confident in both people; null exactly when output is null.",
+          "title": "Shared Joints"
+        },
+        "target": {
+          "description": "Index of the person in the target pose's people.",
+          "minimum": 0,
+          "title": "Target",
+          "type": "integer"
+        },
+        "unusable_reason": {
+          "anyOf": [
+            {
+              "enum": [
+                "no_person",
+                "no_confident_torso",
+                "no_confident_hip",
+                "no_confident_shoulder",
+                "scale_too_small",
+                "too_few_joints"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the target person cannot be compared, when they cannot: 'no_person' (no primary person), 'no_confident_torso' (neither a hip nor a shoulder at params.min_joint_score), 'no_confident_hip' (a shoulder but no hip, e.g. a waist-up crop), 'no_confident_shoulder' (a hip but no shoulder, e.g. a legs crop), 'scale_too_small' (torso under 4 px), 'too_few_joints' (fewer than params.min_usable_joints confident body joints); the first failing check, in that order (docs/metrics.md).",
+          "title": "Unusable Reason"
+        }
+      },
+      "required": [
+        "target",
+        "close"
+      ],
+      "title": "AdherenceMatch",
+      "type": "object"
+    },
+    "AdherenceRequest": {
+      "description": "``POST /adherence``: a generated output's pose against the target pose it was asked for.",
+      "properties": {
+        "output": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PoseResult"
+            },
+            {
+              "$ref": "#/$defs/BarePose"
+            }
+          ],
+          "description": "The pose found in the generated image (POST /pose).",
+          "title": "Output"
+        },
+        "params": {
+          "$ref": "#/$defs/MetricParams",
+          "description": "Metric thresholds (default: suite's)."
+        },
+        "primary_only": {
+          "default": false,
+          "description": "Compare only the two primary subjects (a bare pose's first person) instead of every person.",
+          "title": "Primary Only",
+          "type": "boolean"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PoseResult"
+            },
+            {
+              "$ref": "#/$defs/BarePose"
+            }
+          ],
+          "description": "The pose that was asked for (e.g. the control pose).",
+          "title": "Target"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Distance below which a person holds the pose (default 0.25, the cluster cut).",
+          "title": "Threshold"
+        }
+      },
+      "required": [
+        "target",
+        "output"
+      ],
+      "title": "AdherenceRequest",
+      "type": "object"
+    },
     "BarePose": {
       "description": "People's keypoints without the rest of a PoseResult: one person (133 points) or a list of people.",
       "properties": {
@@ -368,7 +533,7 @@
           "title": "Provider"
         },
         "puppet_version": {
-          "default": "1.3",
+          "default": "1.4",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -694,6 +859,126 @@
       "title": "PersonPose",
       "type": "object"
     },
+    "PoseAdherence": {
+      "description": "Whether an image holds the pose it was asked for: a generated output's people against a target pose's.\n\nIt compares pose shape (the 17 body joints, hip-centred and torso-scaled, as the set metrics do), so it does not\nsee where in the frame a person stands, how large they are, or their hands and face.",
+      "properties": {
+        "adheres": {
+          "description": "Every comparable target person is matched to an output person within the threshold, and at least one target person is comparable.",
+          "title": "Adheres",
+          "type": "boolean"
+        },
+        "close": {
+          "description": "Matched target people within the threshold.",
+          "minimum": 0,
+          "title": "Close",
+          "type": "integer"
+        },
+        "comparable": {
+          "description": "Target people whose pose is usable.",
+          "minimum": 0,
+          "title": "Comparable",
+          "type": "integer"
+        },
+        "distance": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The largest matched distance (the one the verdict hangs on); null with no match.",
+          "title": "Distance"
+        },
+        "estimator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EstimatorProvenance"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The estimator, when both poses are PoseResults naming the same one; else null."
+        },
+        "matched": {
+          "description": "Comparable target people matched to an output person.",
+          "minimum": 0,
+          "title": "Matched",
+          "type": "integer"
+        },
+        "matches": {
+          "description": "One per target person, in order.",
+          "items": {
+            "$ref": "#/$defs/AdherenceMatch"
+          },
+          "title": "Matches",
+          "type": "array"
+        },
+        "mean_distance": {
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Mean matched distance; null with no match.",
+          "title": "Mean Distance"
+        },
+        "output_people": {
+          "description": "People in the output that were considered.",
+          "minimum": 0,
+          "title": "Output People",
+          "type": "integer"
+        },
+        "params": {
+          "$ref": "#/$defs/MetricParams",
+          "description": "The thresholds used."
+        },
+        "primary_only": {
+          "description": "Whether only the two primary subjects were compared.",
+          "title": "Primary Only",
+          "type": "boolean"
+        },
+        "puppet_version": {
+          "default": "1.4",
+          "title": "Puppet Version",
+          "type": "string"
+        },
+        "target_people": {
+          "description": "People in the target pose that were considered.",
+          "minimum": 0,
+          "title": "Target People",
+          "type": "integer"
+        },
+        "threshold": {
+          "description": "The distance below which a person holds the pose.",
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        }
+      },
+      "required": [
+        "adheres",
+        "threshold",
+        "primary_only",
+        "target_people",
+        "output_people",
+        "comparable",
+        "matched",
+        "close"
+      ],
+      "title": "PoseAdherence",
+      "type": "object"
+    },
     "PoseCluster": {
       "description": "A group of similar poses.",
       "properties": {
@@ -816,7 +1101,7 @@
           "type": "string"
         },
         "puppet_version": {
-          "default": "1.3",
+          "default": "1.4",
           "title": "Puppet Version",
           "type": "string"
         }
@@ -1046,7 +1331,7 @@
           "title": "Primary"
         },
         "puppet_version": {
-          "default": "1.3",
+          "default": "1.4",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1196,7 +1481,7 @@
           "$ref": "#/$defs/MetricParams"
         },
         "puppet_version": {
-          "default": "1.3",
+          "default": "1.4",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1466,7 +1751,7 @@
           "$ref": "#/$defs/MetricParams"
         },
         "puppet_version": {
-          "default": "1.3",
+          "default": "1.4",
           "title": "Puppet Version",
           "type": "string"
         },
@@ -1700,7 +1985,7 @@
           "type": "integer"
         },
         "puppet_version": {
-          "default": "1.3",
+          "default": "1.4",
           "title": "Puppet Version",
           "type": "string"
         },
