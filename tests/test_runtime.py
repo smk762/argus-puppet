@@ -254,6 +254,29 @@ def test_no_driver_is_known_before_any_session(pinned, monkeypatch) -> None:
     assert len(probes) == 1 and len(_cuda_warnings(logs)) == 1
 
 
+def test_no_thread_sees_cuda_usable_while_a_failed_probe_is_being_recorded(monkeypatch) -> None:
+    """A second thread asking while the first is recording a failed probe waits for it, never reads "usable"."""
+    import threading
+
+    fake_ort(monkeypatch, ("CUDAExecutionProvider", "CPUExecutionProvider"))
+    monkeypatch.setattr(runtime, "_probe_cuda_driver", lambda: "no CUDA device")
+    real_note = runtime.note_cuda_unavailable
+    seen: list[str | None] = []
+
+    def note_while_another_thread_asks(reason: str) -> None:
+        other = threading.Thread(target=lambda: seen.append(runtime.cuda_problem()))
+        other.start()
+        other.join(0.5)  # on a racy build it answers at once; otherwise it waits on the lock until we return
+        real_note(reason)
+
+    monkeypatch.setattr(runtime, "note_cuda_unavailable", note_while_another_thread_asks)
+    assert runtime.cuda_problem() == "no CUDA device"
+    deadline = time.monotonic() + 5
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert seen == ["no CUDA device"]
+
+
 def test_explicit_cuda_on_a_cpu_only_onnxruntime_is_refused(pinned, monkeypatch) -> None:
     s, name = pinned
     built = fake_ort(monkeypatch)

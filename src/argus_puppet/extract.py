@@ -205,7 +205,8 @@ def _plan(root: Path, images: Sequence[Path], *, overwrite: bool, fence: Path | 
             plan.skip = SKIP_COLLISION
         elif sidecar.exists() and not overwrite:
             plan.skip = SKIP_EXISTS
-        claimed.add(sidecar)
+        if plan.skip != SKIP_OUTSIDE:  # an image that is never posed claims no sidecar from an in-fence sibling
+            claimed.add(sidecar)
         plans.append(plan)
     return plans
 

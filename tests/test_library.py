@@ -216,7 +216,10 @@ def test_build_does_not_depend_on_the_input_order() -> None:
         b = build_library(shuffled, max_entries=3)
         key = lambda lib: sorted((e.id, e.cluster) for e in lib.entries)  # noqa: E731
         assert key(b.library) == key(a.library)
-        assert [e.id for e in b.library.entries] == [r for r in (x.id for x in b.library.entries)]
+        # The set is order-free; the entries themselves keep input order (build_library's docstring).
+        position = {r.image: k for k, r in enumerate(shuffled)}
+        order = [position[e.source_image] for e in b.library.entries]
+        assert order == sorted(order), order
 
 
 def test_build_labels_and_clusters_with_the_real_rules_by_default() -> None:
@@ -442,7 +445,19 @@ def test_no_library_entry_comes_from_a_frame_that_failed_the_age_check() -> None
         assert not sources & (bad | {"f00.png"})
 
 
-def test_without_the_age_check_nothing_is_sent() -> None:
-    ages = FakeAges({})
+def test_without_the_age_check_nothing_is_sent(monkeypatch) -> None:
+    """No ``age_gate``, even with the curator's URL configured: no estimator is built and nothing is fetched."""
+    import argus_cortex.net
+
+    from argus_puppet import age
+
+    def boom(*a, **kw):
+        raise AssertionError("an image was sent without the age check")
+
+    monkeypatch.setenv("ARGUS_PUPPET_AGE_URL", "http://curator.test:8100")
+    monkeypatch.setattr(age, "HttpAgeEstimator", boom)
+    monkeypatch.setattr(argus_cortex.net, "fetch", boom)
+    monkeypatch.setattr(FakeAges, "min_age", boom)  # nor through any estimator object
     build = build_library([_aged("a.png", "stand", b"a")])
-    assert ages.calls == [] and build.library.age_checked is False and build.age_checked == 0
+    assert [e.source_image for e in build.library.entries] == ["a.png"]
+    assert build.library.age_checked is False and build.age_checked == 0

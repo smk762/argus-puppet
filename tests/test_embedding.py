@@ -110,14 +110,20 @@ UNUSABLE_CASES = [
     ("no_confident_torso", make("standing", dropout=HIPS + SHOULDERS)),
     ("no_confident_hip", make("standing", dropout=HIPS)),
     ("no_confident_shoulder", make("standing", dropout=SHOULDERS)),
-    # a legs crop: everything above the hips out of frame, the hips and legs confident (10 joints: count is fine)
+    # a legs crop: everything above the hips out of frame, only the hips, knees and ankles confident. That is 6
+    # joints, under the count minimum too: the shoulder is named because anchors are checked first (the order
+    # test_anchor_reasons_come_before_scale_and_count pins); the plain no-shoulder case above isolates the rule.
     ("no_confident_shoulder", make("standing", dropout=ABOVE_THE_HIPS)),
     ("scale_too_small", make("standing", scale=2.0)),
     ("too_few_joints", make("standing", dropout=(7, 8, 9, 10, 13, 14, 15, 16, 1, 2, 3, 4))),
 ]
 
 
-@pytest.mark.parametrize(("reason", "kp"), UNUSABLE_CASES)
+# The legs crop gets its own id, so the two no_confident_shoulder cases are told apart in a failure.
+UNUSABLE_CASE_IDS = [r for r, _ in UNUSABLE_CASES[:3]] + ["legs_crop_no_shoulder"] + [r for r, _ in UNUSABLE_CASES[4:]]
+
+
+@pytest.mark.parametrize(("reason", "kp"), UNUSABLE_CASES, ids=UNUSABLE_CASE_IDS)
 def test_every_unusable_pose_names_its_reason(reason: str, kp: np.ndarray) -> None:
     assert embed_or_reason(kp) == reason
     assert embed(kp) is None  # embed is embed_or_reason without the reason
@@ -132,6 +138,12 @@ def test_doubtful_anchor_joints_name_the_missing_pair() -> None:
         kp = make("standing")
         kp[list(pair), 2] = 0.2  # above the anchor floor, below the joint threshold: still no confident one
         assert embed_or_reason(kp) == reason and torso_frame_or_reason(kp) == reason
+
+
+def test_the_legs_crop_is_under_the_joint_count_too() -> None:
+    kp = make("standing", dropout=ABOVE_THE_HIPS)
+    assert int(embedding.confident(kp, embedding.DEFAULT_MIN_JOINT_SCORE)[embedding.BODY].sum()) == 6
+    assert embedding.DEFAULT_MIN_USABLE_JOINTS > 6  # so the case relies on the anchor-first order, as it says
 
 
 def test_anchor_reasons_come_before_scale_and_count() -> None:

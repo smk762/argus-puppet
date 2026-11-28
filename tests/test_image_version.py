@@ -41,13 +41,43 @@ def test_release_passes_the_tag_version_as_a_build_arg() -> None:
     assert "value=${{ needs.release-tag.outputs.tag }}" in meta["with"]["tags"]
 
 
+ARG_VERSION_RE = r"\s*ARG\s+VERSION(=|\s|$)"
+
+
+def _version_arg_problem(lines: list[str]) -> str | None:
+    """Why the ``uv build`` RUN would not see ``VERSION``, or ``None``. An ARG is scoped to its build stage: one
+    above the first ``FROM`` (global) or in another stage expands to "" in the build unless re-declared there."""
+    build = next((i for i, line in enumerate(lines) if re.match(r"\s*RUN\s", line) and "uv build" in line), None)
+    if build is None:
+        return "the Dockerfile has no uv build RUN"
+    stage = max((i for i, line in enumerate(lines[:build]) if re.match(r"(?i)\s*FROM\s", line)), default=None)
+    if stage is None:
+        return "the uv build RUN is in no build stage"
+    if not any(re.match(ARG_VERSION_RE, line) for line in lines[stage + 1 : build]):
+        return "the wheel's build stage declares no ARG VERSION before the uv build RUN"
+    return None
+
+
+@pytest.mark.parametrize(
+    ("dockerfile", "problem"),
+    [
+        ('FROM a\nARG VERSION=""\nRUN uv build --wheel', None),
+        ("ARG VERSION\nFROM a\nARG VERSION\nRUN uv build --wheel", None),
+        ("ARG VERSION\nFROM a\nRUN uv build --wheel", "declares no ARG VERSION"),  # global scope only
+        ("FROM a AS one\nARG VERSION\nFROM b\nRUN uv build --wheel", "declares no ARG VERSION"),  # another stage
+        ("FROM a\nRUN uv build --wheel\nARG VERSION", "declares no ARG VERSION"),  # declared after the build
+    ],
+)
+def test_the_version_arg_must_be_declared_in_the_build_stage(dockerfile: str, problem: str | None) -> None:
+    found = _version_arg_problem(dockerfile.splitlines())
+    assert found is None if problem is None else problem in (found or ""), found
+
+
 def test_dockerfile_builds_the_wheel_with_the_version_arg() -> None:
     text = re.sub(r"\\\n", " ", DOCKERFILE.read_text())
     lines = text.splitlines()
-    arg = next((i for i, line in enumerate(lines) if re.match(r"\s*ARG\s+VERSION(=|\s|$)", line)), None)
-    assert arg is not None, "the Dockerfile declares no ARG VERSION"
-    build = next((i for i, line in enumerate(lines) if re.match(r"\s*RUN\s", line) and "uv build" in line), None)
-    assert build is not None and build > arg, "the wheel must be built after ARG VERSION"
+    assert _version_arg_problem(lines) is None, _version_arg_problem(lines)
+    build = next(i for i, line in enumerate(lines) if re.match(r"\s*RUN\s", line) and "uv build" in line)
     assert re.search(r'SETUPTOOLS_SCM_PRETEND_VERSION="\$\{?VERSION', lines[build]), "the build must hand VERSION on"
     # As an ENV it would persist in the image and version dependencies built from source too.
     assert not any(re.match(r"\s*ENV\s.*SETUPTOOLS_SCM_PRETEND_VERSION", line) for line in lines)

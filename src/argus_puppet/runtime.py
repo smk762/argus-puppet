@@ -171,7 +171,8 @@ def cuda_problem() -> str | None:
                 return None
         else:
             return None
-    note_cuda_unavailable(reason)
+        # Recorded before the lock is let go: no other thread may see "probed, no problem" for a failed probe.
+        note_cuda_unavailable(reason)
     return reason
 
 
